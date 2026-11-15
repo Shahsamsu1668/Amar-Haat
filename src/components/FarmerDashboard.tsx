@@ -49,9 +49,13 @@ import {
   Building2,
   Truck,
   ExternalLink,
+  Navigation,
+  Radio,
 } from 'lucide-react';
 import { requestMarketPrediction, MarketPredictionResult } from '../services/aiService';
 import { toBanglaNumber, toBanglaDistrict } from './Header';
+import { DispatchDriverModal } from './DispatchDriverModal';
+import { LiveTrackingModal } from './LiveTrackingModal';
 
 interface FarmerDashboardProps {
   currentUser: User;
@@ -177,6 +181,8 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
   // Orders from Wholesalers
   const [receivedOrders, setReceivedOrders] = useState<SupplyChainOrder[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [dispatchOrderTarget, setDispatchOrderTarget] = useState<SupplyChainOrder | null>(null);
+  const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
 
   // Add Product Form (Dynamic Manual Entry, Image Upload & Unit Selection)
   const [showAddModal, setShowAddModal] = useState(false);
@@ -366,9 +372,29 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
     const handleOrderEvent = () => {
       loadReceivedOrders();
     };
+    const handleDriverLocationEvent = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (!detail?.orderId) return;
+      setReceivedOrders((prev) =>
+        prev.map((ord) =>
+          ord.id === detail.orderId
+            ? {
+                ...ord,
+                driverLat: detail.lat !== undefined ? Number(detail.lat) : ord.driverLat,
+                driverLng: detail.lng !== undefined ? Number(detail.lng) : ord.driverLng,
+                trackingActive: detail.trackingActive ?? true,
+                orderStatus: (detail.orderStatus || ord.orderStatus) as OrderLifecycleStatus,
+                locationUpdatedAt: detail.locationUpdatedAt || new Date().toISOString(),
+              }
+            : ord
+        )
+      );
+    };
     window.addEventListener('nb_order_updated', handleOrderEvent);
+    window.addEventListener('nb_driver_location', handleDriverLocationEvent);
     return () => {
       window.removeEventListener('nb_order_updated', handleOrderEvent);
+      window.removeEventListener('nb_driver_location', handleDriverLocationEvent);
     };
   }, []);
 
@@ -383,7 +409,13 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
 
   // Prevent background scrolling while any modal is open
   useEffect(() => {
-    if (showAddModal || showLedgerModal || Boolean(confirmDialog)) {
+    if (
+      showAddModal ||
+      showLedgerModal ||
+      Boolean(confirmDialog) ||
+      Boolean(dispatchOrderTarget) ||
+      Boolean(trackingOrderTarget)
+    ) {
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = '';
@@ -391,7 +423,7 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
     return () => {
       document.body.style.overflow = '';
     };
-  }, [showAddModal, showLedgerModal, confirmDialog]);
+  }, [showAddModal, showLedgerModal, confirmDialog, dispatchOrderTarget, trackingOrderTarget]);
 
   // AI Price Recommendation
   const handlePredictPrice = async () => {
@@ -880,6 +912,8 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                         className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
                           currentStatus === 'completed' || currentStatus === 'delivered'
                             ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : currentStatus === 'on the way' || currentStatus === 'on_the_way'
+                            ? 'bg-indigo-100 text-indigo-800 border border-indigo-300'
                             : currentStatus === 'shipped' || currentStatus === 'dispatched'
                             ? 'bg-purple-100 text-purple-800 border border-purple-300'
                             : currentStatus === 'accepted'
@@ -891,6 +925,8 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                       >
                         {currentStatus === 'completed' || currentStatus === 'delivered'
                           ? t('Completed / Delivered', 'ডেলিভারি সম্পন্ন হয়েছে')
+                          : currentStatus === 'on the way' || currentStatus === 'on_the_way'
+                          ? t('On the Way', 'পথে রয়েছে (On the Way)')
                           : currentStatus === 'shipped' || currentStatus === 'dispatched'
                           ? t('Shipped (Pending Confirmation)', 'ডেলিভারি করা হয়েছে (অপেক্ষমান)')
                           : currentStatus === 'accepted'
@@ -940,15 +976,53 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                         </>
                       )}
 
-                      {/* Accepted state: Mark as Delivered button */}
+                      {/* Accepted state: Out for Delivery (prompts for Driver's Mobile & sends Auto-SMS) */}
                       {currentStatus === 'accepted' && (
                         <button
-                          onClick={() => handleUpdateOrderStatus(order.id, 'shipped')}
-                          className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 shadow-xs cursor-pointer"
+                          onClick={() => setDispatchOrderTarget(order)}
+                          className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-3.5 py-1.5 rounded-xl text-xs flex items-center gap-1.5 shadow-xs cursor-pointer"
                         >
                           <Truck className="w-3.5 h-3.5" />
-                          <span>{t('Mark as Delivered', 'ডেলিভারি করা হয়েছে')}</span>
+                          <span>{t('Out for Delivery', 'ডেলিভারিতে দেয়া হয়েছে')}</span>
                         </button>
+                      )}
+
+                      {/* On the Way state: Track Order once driver starts sharing live GPS */}
+                      {(currentStatus === 'on the way' || currentStatus === 'on_the_way') && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {order.driverPhone && (
+                            <span className="text-[11px] font-semibold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1">
+                              <Phone className="w-3 h-3" />
+                              {order.driverPhone}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={!order.trackingActive}
+                            onClick={() => setTrackingOrderTarget(order)}
+                            title={
+                              order.trackingActive
+                                ? t('Open live tracking map', 'লাইভ ট্র্যাকিং ম্যাপ খুলুন')
+                                : t('Waiting for driver to tap Start Trip', 'ড্রাইভার ট্রিপ শুরু করলে সক্রিয় হবে')
+                            }
+                            className={`font-bold px-3.5 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition ${
+                              order.trackingActive
+                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm cursor-pointer'
+                                : 'bg-stone-100 text-stone-400 border border-stone-200 cursor-not-allowed'
+                            }`}
+                          >
+                            {order.trackingActive ? (
+                              <Radio className="w-3.5 h-3.5 animate-pulse" />
+                            ) : (
+                              <Navigation className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {order.trackingActive
+                                ? t('Track Order', 'লাইভ ট্র্যাক করুন')
+                                : t('Track Order (Waiting GPS)', 'লাইভ ট্র্যাক করুন (জিপিএস অপেক্ষায়)')}
+                            </span>
+                          </button>
+                        </div>
                       )}
 
                       {/* Shipped state: waiting for wholesaler confirmation */}
@@ -1582,6 +1656,46 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
             ×
           </button>
         </div>
+      )}
+
+      {/* Dispatch Driver Modal */}
+      {dispatchOrderTarget && (
+        <DispatchDriverModal
+          order={dispatchOrderTarget}
+          language={language}
+          onClose={() => setDispatchOrderTarget(null)}
+          onDispatched={() => {
+            loadReceivedOrders();
+            showToast(
+              t('Order marked On the Way & SMS sent to driver!', 'অর্ডার ডেলিভারিতে পাঠানো হয়েছে এবং ড্রাইভারকে এসএমএস দেওয়া হয়েছে!'),
+              'success'
+            );
+          }}
+        />
+      )}
+
+      {/* Live Map Tracking Modal */}
+      {trackingOrderTarget && (
+        <LiveTrackingModal
+          order={trackingOrderTarget}
+          language={language}
+          onClose={() => setTrackingOrderTarget(null)}
+          onOrderSync={(info) => {
+            setReceivedOrders((prev) =>
+              prev.map((ord) =>
+                ord.id === info.orderId
+                  ? {
+                      ...ord,
+                      driverLat: info.driverLat ?? ord.driverLat,
+                      driverLng: info.driverLng ?? ord.driverLng,
+                      trackingActive: info.trackingActive,
+                      locationUpdatedAt: info.locationUpdatedAt || ord.locationUpdatedAt,
+                    }
+                  : ord
+              )
+            );
+          }}
+        />
       )}
 
       {/* Confirmation Modal */}

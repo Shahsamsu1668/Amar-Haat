@@ -3,7 +3,16 @@
  * Persistent database-backed REST communications with the backend Express / SQLite server.
  */
 
-import { MarketplaceProduct, SupplyChainOrder, WholesalerOffer, User, MarketRate, OrderLifecycleStatus } from '../types';
+import {
+  MarketplaceProduct,
+  SupplyChainOrder,
+  WholesalerOffer,
+  User,
+  MarketRate,
+  OrderLifecycleStatus,
+  TrackerOrderInfo,
+  DispatchOrderResponse,
+} from '../types';
 
 const BASE_URL = '';
 
@@ -209,6 +218,45 @@ export const orderApi = {
     return fetchJson(`/api/orders/${orderId}/status`, {
       method: 'PUT',
       body: JSON.stringify({ status, actorName, actorRole }),
+    });
+  },
+
+  async dispatchOrder(
+    orderId: string,
+    driverPhone: string,
+    origin?: string
+  ): Promise<DispatchOrderResponse> {
+    return fetchJson(`/api/orders/${orderId}/dispatch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        driverPhone,
+        origin: origin || (typeof window !== 'undefined' ? window.location.origin : ''),
+      }),
+    });
+  },
+
+  async getTrackingInfo(orderId: string): Promise<TrackerOrderInfo> {
+    return fetchJson(`/api/tracker/${encodeURIComponent(orderId)}`);
+  },
+
+  async pushDriverLocation(
+    orderId: string,
+    lat: number,
+    lng: number,
+    active = true
+  ): Promise<{
+    success: boolean;
+    orderId: string;
+    lat: number;
+    lng: number;
+    trackingActive: boolean;
+    orderStatus: string;
+    tripStartedAt: string | null;
+    locationUpdatedAt: string;
+  }> {
+    return fetchJson(`/api/tracker/${encodeURIComponent(orderId)}/location`, {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, active }),
     });
   },
 };

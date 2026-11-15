@@ -17,6 +17,7 @@ import { db as jsonDb } from './server/db.js';
 import { generateDistrictMarketPrices, getAllDistrictsMarketPrices, findDistrictInfo } from './src/server/marketData.js';
 import {
   pool,
+  isNeonConfigured,
   initNeonDatabase,
   syncLegacyUsersToNeon,
   executeNeonOrderTransaction,
@@ -35,6 +36,11 @@ import {
   SESSION_COOKIE_OPTIONS,
   type AuthenticatedRequest,
 } from './src/server/auth.js';
+import {
+  sendDriverTrackingSMS,
+  normalizePhoneNumber,
+  isValidSmsPhone,
+} from './src/server/smsService.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -253,68 +259,72 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Initialize Neon Cloud PostgreSQL
-try {
-  await initNeonDatabase();
+if (isNeonConfigured) {
+  try {
+    await initNeonDatabase();
 
-  // Seed the administrator into Neon PostgreSQL if it does not exist yet.
-  // Password and security PIN are stored only as bcrypt hashes.
-  const seedAdminUser = process.env.ADMIN_USER;
-  const seedAdminPassword = process.env.ADMIN_PASSWORD;
-  const seedAdminPin = process.env.ADMIN_PIN;
-  if (seedAdminUser && seedAdminPassword && seedAdminPin) {
-    const existingAdmin = await pool.query(
-      "SELECT id FROM users WHERE role = 'admin' AND (phone = $1 OR email = $1) LIMIT 1",
-      [seedAdminUser]
-    );
-    if (existingAdmin.rows.length === 0) {
-      const adminPwHash = await hashPassword(seedAdminPassword);
-      const adminPinHash = await hashPassword(seedAdminPin);
-      await pool.query(
-        `INSERT INTO users (id, role, name, name_bn, phone, email, password_hash, password_algo, district, upazila, verified, two_factor_enabled, security_pin, created_at)
-         VALUES ('admin-root', 'admin', 'Central Platform Administrator', 'কেন্দ্রীয় প্ল্যাটফর্ম প্রশাসক', $1, 'admin@nativebazar.gov.bd', $2, 'bcrypt', 'Bogura', 'Bogura Sadar', true, true, $3, NOW())
-         ON CONFLICT (id) DO UPDATE SET role = 'admin', phone = EXCLUDED.phone, password_hash = EXCLUDED.password_hash,
-           password_algo = 'bcrypt', two_factor_enabled = true, security_pin = EXCLUDED.security_pin`,
-        [seedAdminUser, adminPwHash, adminPinHash]
+    // Seed the administrator into Neon PostgreSQL if it does not exist yet.
+    // Password and security PIN are stored only as bcrypt hashes.
+    const seedAdminUser = process.env.ADMIN_USER;
+    const seedAdminPassword = process.env.ADMIN_PASSWORD;
+    const seedAdminPin = process.env.ADMIN_PIN;
+    if (seedAdminUser && seedAdminPassword && seedAdminPin) {
+      const existingAdmin = await pool.query(
+        "SELECT id FROM users WHERE role = 'admin' AND (phone = $1 OR email = $1) LIMIT 1",
+        [seedAdminUser]
       );
-      console.log('[Neon] Administrator account seeded.');
-    } else {
-      // Repair admin records created by older builds (e.g. placeholder password hash
-      // or missing PIN) so the configured credentials always work.
-      const adminRow = await pool.query(
-        'SELECT id, password_hash, security_pin FROM users WHERE id = $1',
-        [existingAdmin.rows[0].id]
-      );
-      const row = adminRow.rows[0];
-      let pwOk = false;
-      let pinOk = false;
-      try { pwOk = (await verifyPassword(seedAdminPassword, row.password_hash)).valid; } catch { pwOk = false; }
-      try { pinOk = !!row.security_pin && (await verifyPassword(seedAdminPin, row.security_pin)).valid; } catch { pinOk = false; }
-      if (!pwOk || !pinOk) {
+      if (existingAdmin.rows.length === 0) {
         const adminPwHash = await hashPassword(seedAdminPassword);
         const adminPinHash = await hashPassword(seedAdminPin);
         await pool.query(
-          "UPDATE users SET password_hash = $1, password_algo = 'bcrypt', security_pin = $2, two_factor_enabled = true WHERE id = $3",
-          [adminPwHash, adminPinHash, row.id]
+          `INSERT INTO users (id, role, name, name_bn, phone, email, password_hash, password_algo, district, upazila, verified, two_factor_enabled, security_pin, created_at)
+           VALUES ('admin-root', 'admin', 'Central Platform Administrator', 'কেন্দ্রীয় প্ল্যাটফর্ম প্রশাসক', $1, 'admin@nativebazar.gov.bd', $2, 'bcrypt', 'Bogura', 'Bogura Sadar', true, true, $3, NOW())
+           ON CONFLICT (id) DO UPDATE SET role = 'admin', phone = EXCLUDED.phone, password_hash = EXCLUDED.password_hash,
+             password_algo = 'bcrypt', two_factor_enabled = true, security_pin = EXCLUDED.security_pin`,
+          [seedAdminUser, adminPwHash, adminPinHash]
         );
-        console.log('[Neon] Administrator credentials re-synced from environment.');
+        console.log('[Neon] Administrator account seeded.');
+      } else {
+        // Repair admin records created by older builds (e.g. placeholder password hash
+        // or missing PIN) so the configured credentials always work.
+        const adminRow = await pool.query(
+          'SELECT id, password_hash, security_pin FROM users WHERE id = $1',
+          [existingAdmin.rows[0].id]
+        );
+        const row = adminRow.rows[0];
+        let pwOk = false;
+        let pinOk = false;
+        try { pwOk = (await verifyPassword(seedAdminPassword, row.password_hash)).valid; } catch { pwOk = false; }
+        try { pinOk = !!row.security_pin && (await verifyPassword(seedAdminPin, row.security_pin)).valid; } catch { pinOk = false; }
+        if (!pwOk || !pinOk) {
+          const adminPwHash = await hashPassword(seedAdminPassword);
+          const adminPinHash = await hashPassword(seedAdminPin);
+          await pool.query(
+            "UPDATE users SET password_hash = $1, password_algo = 'bcrypt', security_pin = $2, two_factor_enabled = true WHERE id = $3",
+            [adminPwHash, adminPinHash, row.id]
+          );
+          console.log('[Neon] Administrator credentials re-synced from environment.');
+        }
       }
+    } else {
+      console.warn('[Neon] ADMIN_USER / ADMIN_PASSWORD / ADMIN_PIN not set; admin seeding skipped.');
     }
-  } else {
-    console.warn('[Neon] ADMIN_USER / ADMIN_PASSWORD / ADMIN_PIN not set; admin seeding skipped.');
-  }
 
-  // Safe gate: Never automatically sync or overwrite legacy SQLite users in production.
-  // Production user records in Neon PostgreSQL are the authoritative source of truth.
-  // Legacy user sync is only executed in development when explicitly requested via env var.
-  if (process.env.AUTO_SYNC_LEGACY_USERS === 'true' && process.env.NODE_ENV !== 'production') {
-    const sqliteUsers = db.prepare('SELECT * FROM users').all() as any[];
-    await syncLegacyUsersToNeon(sqliteUsers);
-    console.log('[Neon] Development legacy users sync completed.');
-  } else {
-    console.log('[Neon] PostgreSQL connection verified and schema tables ready.');
+    // Safe gate: Never automatically sync or overwrite legacy SQLite users in production.
+    // Production user records in Neon PostgreSQL are the authoritative source of truth.
+    // Legacy user sync is only executed in development when explicitly requested via env var.
+    if (process.env.AUTO_SYNC_LEGACY_USERS === 'true' && process.env.NODE_ENV !== 'production') {
+      const sqliteUsers = db.prepare('SELECT * FROM users').all() as any[];
+      await syncLegacyUsersToNeon(sqliteUsers);
+      console.log('[Neon] Development legacy users sync completed.');
+    } else {
+      console.log('[Neon] PostgreSQL connection verified and schema tables ready.');
+    }
+  } catch (neonErr: any) {
+    console.warn('[Neon] Database initialization notice:', neonErr?.message || neonErr);
   }
-} catch (neonErr: any) {
-  console.warn('[Neon] Database initialization notice:', neonErr?.message || neonErr);
+} else {
+  console.info('[Startup] DATABASE_URL not configured; running with local SQLite fallback.');
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -827,20 +837,22 @@ app.post('/api/auth/login', async (req, res) => {
     let user: any = null;
 
     // 1. Check Neon PostgreSQL
-    try {
-      let q = 'SELECT * FROM users WHERE (phone = $1 OR email = $2)';
-      const params: any[] = [identifier, identifier];
-      if (role) {
-        q += ' AND role = $3';
-        params.push(role);
+    if (isNeonConfigured) {
+      try {
+        let q = 'SELECT * FROM users WHERE (phone = $1 OR email = $2)';
+        const params: any[] = [identifier, identifier];
+        if (role) {
+          q += ' AND role = $3';
+          params.push(role);
+        }
+        q += ' LIMIT 1';
+        const r = await pool.query(q, params);
+        if (r.rows.length > 0) {
+          user = r.rows[0];
+        }
+      } catch (err) {
+        console.warn('[Neon] Login query error, falling back to SQLite:', err);
       }
-      q += ' LIMIT 1';
-      const r = await pool.query(q, params);
-      if (r.rows.length > 0) {
-        user = r.rows[0];
-      }
-    } catch (err) {
-      console.warn('[Neon] Login query error, falling back to SQLite:', err);
     }
 
     // Fallback to SQLite if not found in Neon
@@ -861,13 +873,15 @@ app.post('/api/auth/login', async (req, res) => {
 
     const { valid, needsRehash } = await verifyPassword(password, user.password_hash || user.passwordHash);
     if (!valid) {
-      try {
-        await pool.query(
-          `INSERT INTO login_audit_logs (user_id, phone, role, status, ip_address, user_agent, details)
-           VALUES ($1, $2, $3, 'FAILED', $4, $5, 'Invalid password attempt')`,
-          [user.id, user.phone, user.role, req.ip || '127.0.0.1', req.headers['user-agent'] || 'Web Client']
-        );
-      } catch {}
+      if (isNeonConfigured) {
+        try {
+          await pool.query(
+            `INSERT INTO login_audit_logs (user_id, phone, role, status, ip_address, user_agent, details)
+             VALUES ($1, $2, $3, 'FAILED', $4, $5, 'Invalid password attempt')`,
+            [user.id, user.phone, user.role, req.ip || '127.0.0.1', req.headers['user-agent'] || 'Web Client']
+          );
+        } catch {}
+      }
       return res.status(401).json({ error: 'Incorrect password. Please try again.' });
     }
 
@@ -875,10 +889,12 @@ app.post('/api/auth/login', async (req, res) => {
     if (needsRehash) {
       try {
         const modernHash = await hashPassword(password);
-        await pool.query(
-          `UPDATE users SET password_hash = $1, password_algo = 'bcrypt' WHERE id = $2`,
-          [modernHash, user.id]
-        );
+        if (isNeonConfigured) {
+          await pool.query(
+            `UPDATE users SET password_hash = $1, password_algo = 'bcrypt' WHERE id = $2`,
+            [modernHash, user.id]
+          );
+        }
         db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(modernHash, user.id);
         jsonDb.updateUser(user.id, { passwordHash: modernHash });
         console.log(`[Auth Migration] Password hash for user ${user.phone} (${user.id}) successfully migrated to bcrypt.`);
@@ -888,25 +904,29 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const nowIso = new Date().toISOString();
-    try {
-      await pool.query('UPDATE users SET last_login_at = $1 WHERE id = $2', [nowIso, user.id]);
-    } catch {}
+    if (isNeonConfigured) {
+      try {
+        await pool.query('UPDATE users SET last_login_at = $1 WHERE id = $2', [nowIso, user.id]);
+      } catch {}
+    }
     try {
       db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(nowIso, user.id);
     } catch {}
 
-    // 3. Issue server-side revocable session in Neon PostgreSQL
+    // 3. Issue server-side revocable session in Neon PostgreSQL (with SQLite fallback)
     const { rawToken } = await createSession(user.id, user.role, req);
     res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
 
     // Audit log successful login
-    try {
-      await pool.query(
-        `INSERT INTO login_audit_logs (user_id, phone, role, status, ip_address, user_agent, details)
-         VALUES ($1, $2, $3, 'SUCCESS', $4, $5, 'Session created')`,
-        [user.id, user.phone, user.role, req.ip || '127.0.0.1', req.headers['user-agent'] || 'Web Client']
-      );
-    } catch {}
+    if (isNeonConfigured) {
+      try {
+        await pool.query(
+          `INSERT INTO login_audit_logs (user_id, phone, role, status, ip_address, user_agent, details)
+           VALUES ($1, $2, $3, 'SUCCESS', $4, $5, 'Session created')`,
+          [user.id, user.phone, user.role, req.ip || '127.0.0.1', req.headers['user-agent'] || 'Web Client']
+        );
+      } catch {}
+    }
 
     let primaryCropsParsed = undefined;
     try {
@@ -1518,119 +1538,190 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// Get orders: filtered by user or role from Neon PostgreSQL
+function formatOrderItemOutput(it: any) {
+  return {
+    id: it.id,
+    productId: it.product_id,
+    cropName: it.crop_name,
+    banglaName: it.bangla_name,
+    quantityKg: parseFloat(it.quantity_kg),
+    unitPrice: parseFloat(it.unit_price),
+    subtotal: parseFloat(it.subtotal),
+    unit: it.unit || 'kg',
+  };
+}
+
+function formatOrderOutput(o: any, items: any[]) {
+  const rawStatus = String(o.order_status || o.delivery_status || 'pending').trim();
+  const canonicalStatus =
+    rawStatus.toLowerCase() === 'on the way' || rawStatus.toLowerCase() === 'on_the_way'
+      ? 'On the Way'
+      : rawStatus.toLowerCase();
+  return {
+    id: o.id,
+    orderType: o.order_type,
+    buyerId: o.buyer_id,
+    buyerName: o.buyer_name,
+    buyerPhone: o.buyer_phone,
+    buyerEmail: o.buyer_email,
+    buyerRole: o.buyer_role,
+    sellerId: o.seller_id,
+    sellerName: o.seller_name,
+    sellerPhone: o.seller_phone,
+    sellerRole: o.seller_role,
+    totalBDT: parseFloat(o.total_bdt),
+    paymentMethod: o.payment_method,
+    paymentStatus: o.payment_status,
+    deliveryStatus: canonicalStatus,
+    orderStatus: canonicalStatus,
+    status: canonicalStatus,
+    deliveryAddress: o.delivery_address,
+    district: o.district,
+    trackingCode: o.tracking_code,
+    driverPhone: o.driver_phone || undefined,
+    trackingUrl: o.tracking_url || undefined,
+    driverLat: o.driver_lat !== null && o.driver_lat !== undefined ? Number(o.driver_lat) : undefined,
+    driverLng: o.driver_lng !== null && o.driver_lng !== undefined ? Number(o.driver_lng) : undefined,
+    trackingActive: Boolean(o.tracking_active),
+    tripStartedAt: o.trip_started_at || undefined,
+    locationUpdatedAt: o.location_updated_at || undefined,
+    notes: o.notes,
+    createdAt: o.created_at,
+    updatedAt: o.updated_at,
+    items,
+  };
+}
+
+// Get orders: filtered by user or role from Neon PostgreSQL (with SQLite fallback)
 app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const authUser = req.user!;
+  const { userId, role, sellerId, buyerId, customerId } = req.query as any;
+  const targetBuyer = buyerId || customerId;
+
+  if (isNeonConfigured) {
+    try {
+      let query = 'SELECT * FROM orders WHERE 1=1';
+      const params: any[] = [];
+      let idx = 1;
+
+      if (authUser.role === 'admin') {
+        if (targetBuyer) {
+          query += ` AND buyer_id = $${idx++}`;
+          params.push(targetBuyer);
+        } else if (sellerId) {
+          query += ` AND seller_id = $${idx++}`;
+          params.push(sellerId);
+        } else if (userId) {
+          query += ` AND (buyer_id = $${idx} OR seller_id = $${idx})`;
+          params.push(userId);
+          idx++;
+        }
+        if (role) {
+          query += ` AND (buyer_role = $${idx} OR seller_role = $${idx})`;
+          params.push(role);
+          idx++;
+        }
+      } else {
+        query += ` AND (buyer_id = $${idx} OR seller_id = $${idx})`;
+        params.push(authUser.id);
+        idx++;
+      }
+
+      query += ' ORDER BY created_at DESC';
+
+      const orderRes = await pool.query(query, params);
+      const orderRows = orderRes.rows;
+
+      if (orderRows.length === 0) {
+        return res.json({ success: true, orders: [], total: 0 });
+      }
+
+      const orderIds = orderRows.map((o) => o.id);
+      const itemsRes = await pool.query(
+        'SELECT * FROM order_items WHERE order_id = ANY($1::text[]) ORDER BY id',
+        [orderIds]
+      );
+
+      const itemsByOrderId = new Map<string, any[]>();
+      for (const it of itemsRes.rows) {
+        if (!itemsByOrderId.has(it.order_id)) {
+          itemsByOrderId.set(it.order_id, []);
+        }
+        itemsByOrderId.get(it.order_id)!.push(formatOrderItemOutput(it));
+      }
+
+      const fullOrders = orderRows.map((o) => formatOrderOutput(o, itemsByOrderId.get(o.id) || []));
+      return res.json({ success: true, orders: fullOrders, total: fullOrders.length });
+    } catch (err: any) {
+      console.warn('[Orders] Neon GET /api/orders failed, falling back to SQLite:', err?.message || err);
+    }
+  }
+
+  // Offline / free-tier drop fallback using SQLite
   try {
-    const authUser = req.user!;
-    let query = 'SELECT * FROM orders WHERE 1=1';
+    let sql = 'SELECT * FROM orders WHERE 1=1';
     const params: any[] = [];
-    let idx = 1;
 
     if (authUser.role === 'admin') {
-      const { userId, role, sellerId, buyerId, customerId } = req.query as any;
-      const targetBuyer = buyerId || customerId;
       if (targetBuyer) {
-        query += ` AND buyer_id = $${idx++}`;
+        sql += ' AND buyer_id = ?';
         params.push(targetBuyer);
       } else if (sellerId) {
-        query += ` AND seller_id = $${idx++}`;
+        sql += ' AND seller_id = ?';
         params.push(sellerId);
       } else if (userId) {
-        query += ` AND (buyer_id = $${idx} OR seller_id = $${idx})`;
-        params.push(userId);
-        idx++;
+        sql += ' AND (buyer_id = ? OR seller_id = ?)';
+        params.push(userId, userId);
       }
       if (role) {
-        query += ` AND (buyer_role = $${idx} OR seller_role = $${idx})`;
-        params.push(role);
-        idx++;
+        sql += ' AND (buyer_role = ? OR seller_role = ?)';
+        params.push(role, role);
       }
     } else {
-      // Non-admins strictly access only orders where they are buyer or seller
-      query += ` AND (buyer_id = $${idx} OR seller_id = $${idx})`;
-      params.push(authUser.id);
-      idx++;
+      sql += ' AND (buyer_id = ? OR seller_id = ?)';
+      params.push(authUser.id, authUser.id);
     }
 
-    query += ' ORDER BY created_at DESC';
+    sql += ' ORDER BY created_at DESC';
 
-    const orderRes = await pool.query(query, params);
-    const orderRows = orderRes.rows;
-
+    const orderRows = db.prepare(sql).all(...params) as any[];
     if (orderRows.length === 0) {
       return res.json({ success: true, orders: [], total: 0 });
     }
 
     const orderIds = orderRows.map((o) => o.id);
-    const itemsRes = await pool.query(
-      'SELECT * FROM order_items WHERE order_id = ANY($1::text[]) ORDER BY id',
-      [orderIds]
-    );
+    const placeholders = orderIds.map(() => '?').join(',');
+    const itemRows = db
+      .prepare(`SELECT * FROM order_items WHERE order_id IN (${placeholders}) ORDER BY id`)
+      .all(...orderIds) as any[];
 
     const itemsByOrderId = new Map<string, any[]>();
-    for (const it of itemsRes.rows) {
+    for (const it of itemRows) {
       if (!itemsByOrderId.has(it.order_id)) {
         itemsByOrderId.set(it.order_id, []);
       }
-      itemsByOrderId.get(it.order_id)!.push({
-        id: it.id,
-        productId: it.product_id,
-        cropName: it.crop_name,
-        banglaName: it.bangla_name,
-        quantityKg: parseFloat(it.quantity_kg),
-        unitPrice: parseFloat(it.unit_price),
-        subtotal: parseFloat(it.subtotal),
-      });
+      itemsByOrderId.get(it.order_id)!.push(formatOrderItemOutput(it));
     }
 
-    const fullOrders = orderRows.map((o) => {
-      const canonicalStatus = (o.order_status || o.delivery_status || 'pending').toLowerCase();
-      return {
-        id: o.id,
-        orderType: o.order_type,
-        buyerId: o.buyer_id,
-        buyerName: o.buyer_name,
-        buyerPhone: o.buyer_phone,
-        buyerEmail: o.buyer_email,
-        buyerRole: o.buyer_role,
-        sellerId: o.seller_id,
-        sellerName: o.seller_name,
-        sellerPhone: o.seller_phone,
-        sellerRole: o.seller_role,
-        totalBDT: parseFloat(o.total_bdt),
-        paymentMethod: o.payment_method,
-        paymentStatus: o.payment_status,
-        deliveryStatus: canonicalStatus,
-        orderStatus: canonicalStatus,
-        status: canonicalStatus,
-        deliveryAddress: o.delivery_address,
-        district: o.district,
-        trackingCode: o.tracking_code,
-        notes: o.notes,
-        createdAt: o.created_at,
-        updatedAt: o.updated_at,
-        items: itemsByOrderId.get(o.id) || [],
-      };
-    });
-
+    const fullOrders = orderRows.map((o) => formatOrderOutput(o, itemsByOrderId.get(o.id) || []));
     return res.json({ success: true, orders: fullOrders, total: fullOrders.length });
-  } catch (err: any) {
-    console.error('Error fetching Neon orders:', err);
-    return res.status(500).json({ error: err.message });
+  } catch (sqliteErr: any) {
+    console.error('[Orders] SQLite GET /api/orders error:', sqliteErr);
+    return res.status(500).json({ error: sqliteErr?.message || 'Failed to fetch orders' });
   }
 });
 
-// Update order lifecycle status in Neon PostgreSQL
-// Valid states: pending, accepted, rejected, shipped, completed
+// Update order lifecycle status in Neon PostgreSQL (with SQLite fallback)
+// Valid states: pending, accepted, rejected, shipped, On the Way, completed
 app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
     const authUser = req.user!;
 
-    const orderRes = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
-    if (orderRes.rows.length === 0) return res.status(404).json({ error: 'Order not found.' });
-    const order = orderRes.rows[0];
+    const found = await findOrderWithItemsForTracking(id);
+    if (!found) return res.status(404).json({ error: 'Order not found.' });
+    const order = found.order;
 
     const isSeller = order.seller_id === authUser.id;
     const isBuyer = order.buyer_id === authUser.id;
@@ -1646,51 +1737,75 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
     if (raw === 'accepted') targetStatus = 'accepted';
     else if (raw === 'rejected' || raw === 'cancelled') targetStatus = 'rejected';
     else if (raw === 'shipped' || raw === 'dispatched' || raw === 'pending_delivery') targetStatus = 'shipped';
+    else if (raw === 'on the way' || raw === 'on_the_way' || raw === 'out for delivery' || raw === 'out_for_delivery') targetStatus = 'On the Way';
     else if (raw === 'completed' || raw === 'delivered' || raw === 'received') targetStatus = 'completed';
     else targetStatus = raw;
 
-    // Handle inventory restoration if order is rejected/cancelled
-    if (targetStatus === 'rejected') {
-      const client = await pool.connect();
+    let updatedInNeon = false;
+    if (isNeonConfigured) {
       try {
-        await client.query('BEGIN');
-        const items = (await client.query('SELECT product_id, quantity_kg FROM order_items WHERE order_id = $1', [id])).rows;
-        for (const item of items) {
-          await client.query(
-            'UPDATE products SET available_qty = available_qty + $1, updated_at = NOW() WHERE id = $2',
-            [item.quantity_kg, item.product_id]
+        if (targetStatus === 'rejected') {
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const items = (await client.query('SELECT product_id, quantity_kg FROM order_items WHERE order_id = $1', [id])).rows;
+            for (const item of items) {
+              await client.query(
+                'UPDATE products SET available_qty = available_qty + $1, updated_at = NOW() WHERE id = $2',
+                [item.quantity_kg, item.product_id]
+              );
+            }
+            await client.query(
+              "UPDATE orders SET delivery_status = 'rejected', order_status = 'rejected', updated_at = NOW() WHERE id = $1",
+              [id]
+            );
+            await client.query(`
+              INSERT INTO trade_audit_logs (id, order_id, type, amount, actor_role, actor_name, description, created_at)
+              VALUES ($1, $2, 'ORDER_REJECTED', $3, $4, $5, $6, NOW())
+            `, [
+              `aud-rej-${Date.now()}`, id, order.total_bdt, authUser.role, authUser.name,
+              `Order ${id} rejected by ${authUser.name} (${authUser.role}). Stock restored.`
+            ]);
+            await client.query('COMMIT');
+            updatedInNeon = true;
+          } catch (txErr) {
+            await client.query('ROLLBACK');
+            throw txErr;
+          } finally {
+            client.release();
+          }
+        } else {
+          await pool.query(
+            'UPDATE orders SET delivery_status = $1, order_status = $1, updated_at = NOW() WHERE id = $2',
+            [targetStatus, id]
           );
+          updatedInNeon = true;
         }
-        await client.query(
-          "UPDATE orders SET delivery_status = 'rejected', order_status = 'rejected', updated_at = NOW() WHERE id = $1",
-          [id]
-        );
-        await client.query(`
-          INSERT INTO trade_audit_logs (id, order_id, type, amount, actor_role, actor_name, description, created_at)
-          VALUES ($1, $2, 'ORDER_REJECTED', $3, $4, $5, $6, NOW())
-        `, [
-          `aud-rej-${Date.now()}`, id, order.total_bdt, authUser.role, authUser.name,
-          `Order ${id} rejected by ${authUser.name} (${authUser.role}). Stock restored.`
-        ]);
-        await client.query('COMMIT');
-      } catch (err: any) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
+      } catch (neonErr: any) {
+        console.warn('[Orders] Neon status update failed, falling back to SQLite:', neonErr?.message || neonErr);
       }
-    } else {
-      await pool.query(
-        'UPDATE orders SET delivery_status = $1, order_status = $1, updated_at = NOW() WHERE id = $2',
-        [targetStatus, id]
-      );
     }
 
-    // Sync status to local SQLite store
+    // Sync status to local SQLite store (authoritative fallback when offline / Neon down)
     try {
-      db.prepare("UPDATE orders SET delivery_status = ?, order_status = ?, updated_at = ? WHERE id = ?")
-        .run(targetStatus, targetStatus, new Date().toISOString(), id);
-    } catch (sqliteErr) {}
+      const nowIso = new Date().toISOString();
+      if (targetStatus === 'rejected') {
+        const sqliteItems = db
+          .prepare('SELECT product_id, quantity_kg FROM order_items WHERE order_id = ?')
+          .all(id) as any[];
+        for (const item of sqliteItems) {
+          db.prepare(
+            'UPDATE products SET available_qty = COALESCE(available_qty, available_kg, 0) + ?, available_kg = COALESCE(available_kg, available_qty, 0) + ? WHERE id = ?'
+          ).run(item.quantity_kg, item.quantity_kg, item.product_id);
+        }
+      }
+      db.prepare('UPDATE orders SET delivery_status = ?, order_status = ?, updated_at = ? WHERE id = ?')
+        .run(targetStatus, targetStatus, nowIso, id);
+    } catch (sqliteErr: any) {
+      if (!updatedInNeon) {
+        throw sqliteErr;
+      }
+    }
 
     // ─── Real-Time Notifications for Lifecycle Events Across All Tiers ──────────
     try {
@@ -1773,6 +1888,354 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
 });
 
 // ─── WHOLESALER BIDS & FARMER INTELLIGENCE (NEON POSTGRESQL) ─────────────────────
+
+// Helper to look up order + items across Neon (primary) and SQLite (fallback)
+async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: any; items: any[] } | null> {
+  if (isNeonConfigured) {
+    try {
+      const orderRes = await pool.query('SELECT * FROM orders WHERE id = $1 LIMIT 1', [orderId]);
+      if (orderRes.rows.length > 0) {
+        const itemsRes = await pool.query(
+          'SELECT crop_name, bangla_name, quantity_kg, unit FROM order_items WHERE order_id = $1',
+          [orderId]
+        );
+        return { order: orderRes.rows[0], items: itemsRes.rows };
+      }
+    } catch (err: any) {
+      console.warn('[Tracker] Neon order lookup fallback to SQLite:', err?.message);
+    }
+  }
+
+  try {
+    const sqliteOrder = db.prepare('SELECT * FROM orders WHERE id = ? LIMIT 1').get(orderId) as any;
+    if (sqliteOrder) {
+      const sqliteItems = db
+        .prepare('SELECT crop_name, bangla_name, quantity_kg, unit FROM order_items WHERE order_id = ?')
+        .all(orderId) as any[];
+      return { order: sqliteOrder, items: sqliteItems };
+    }
+  } catch (err: any) {
+    console.warn('[Tracker] SQLite order lookup error:', err?.message);
+  }
+
+  return null;
+}
+
+// Dispatch Order Out for Delivery & Auto-SMS Driver
+app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const authUser = req.user!;
+    const orderId = req.params.id;
+    const rawDriverPhone = req.body?.driverPhone || req.body?.driver_phone || '';
+
+    if (!isValidSmsPhone(rawDriverPhone)) {
+      return res.status(400).json({
+        error: 'Please enter a valid driver mobile number (e.g., 017XXXXXXXX).',
+      });
+    }
+    const normalizedPhone = normalizePhoneNumber(rawDriverPhone);
+
+    const found = await findOrderWithItemsForTracking(orderId);
+    if (!found) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = found.order;
+
+    if (authUser.id !== order.seller_id && authUser.role !== 'admin') {
+      return res.status(403).json({
+        error: 'Only the seller or admin can mark this order Out for Delivery.',
+      });
+    }
+
+    const trackingPath = `/tracker/${orderId}`;
+    const rawOrigin =
+      req.body?.origin ||
+      process.env.APP_URL ||
+      (req.get('host') ? `${req.protocol}://${req.get('host')}` : 'http://localhost:3000');
+    const fullTrackingUrl = `${String(rawOrigin).replace(/\/+$/, '')}${trackingPath}`;
+
+    const targetStatus = 'On the Way';
+    const nowIso = new Date().toISOString();
+
+    // Update Neon PostgreSQL when configured
+    if (isNeonConfigured) {
+      try {
+        await pool.query(
+          `UPDATE orders
+           SET order_status = $1,
+               delivery_status = $1,
+               driver_phone = $2,
+               tracking_url = $3,
+               updated_at = NOW()
+           WHERE id = $4`,
+          [targetStatus, normalizedPhone, trackingPath, orderId]
+        );
+      } catch (neonErr: any) {
+        console.warn('[Dispatch] Neon update warning:', neonErr?.message);
+      }
+    }
+
+    // Mirror to SQLite backup store
+    try {
+      db.prepare(
+        `UPDATE orders
+         SET order_status = ?,
+             delivery_status = ?,
+             driver_phone = ?,
+             tracking_url = ?,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(targetStatus, targetStatus, normalizedPhone, trackingPath, nowIso, orderId);
+    } catch (sqliteErr: any) {
+      console.warn('[Dispatch] SQLite mirror warning:', sqliteErr?.message);
+    }
+
+    // Send simulated / webhook SMS to Driver
+    const smsResult = await sendDriverTrackingSMS({
+      orderId,
+      driverPhone: normalizedPhone,
+      trackingUrl: fullTrackingUrl,
+      sellerName: order.seller_name,
+      buyerName: order.buyer_name,
+      district: order.district,
+      deliveryAddress: order.delivery_address,
+    });
+
+    // Notify Buyer & emit real-time SSE update
+    if (order.buyer_id) {
+      try {
+        await createNeonNotification(
+          order.buyer_id,
+          `পণ্য ডেলিভারিতে পাঠানো হয়েছে / Out for Delivery`,
+          `${order.seller_name || 'Seller'} আপনার অর্ডারটি ডেলিভারিতে পাঠিয়েছেন। ড্রাইভার: ${normalizedPhone}।`,
+          'order',
+          `/orders`
+        );
+      } catch (notifErr: any) {
+        console.warn('[Dispatch] Buyer notification warning:', notifErr?.message);
+      }
+      sendSSE(order.buyer_id, 'order_updated', {
+        orderId,
+        orderStatus: targetStatus,
+        driverPhone: normalizedPhone,
+        trackingUrl: trackingPath,
+        trackingActive: Boolean(order.tracking_active),
+      });
+    }
+    if (order.seller_id) {
+      sendSSE(order.seller_id, 'order_updated', {
+        orderId,
+        orderStatus: targetStatus,
+        driverPhone: normalizedPhone,
+        trackingUrl: trackingPath,
+        trackingActive: Boolean(order.tracking_active),
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Order dispatched Out for Delivery and SMS sent to ${normalizedPhone}`,
+      orderId,
+      orderStatus: targetStatus,
+      driverPhone: normalizedPhone,
+      trackingPath,
+      trackingUrl: fullTrackingUrl,
+      sms: smsResult,
+    });
+  } catch (err: any) {
+    console.error('[POST /api/orders/:id/dispatch] error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to dispatch order' });
+  }
+});
+
+// Public endpoint: Fetch trip info & live GPS coordinates for /tracker/:orderId and live map viewers
+app.get('/api/tracker/:orderId', async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    const found = await findOrderWithItemsForTracking(orderId);
+    if (!found) {
+      return res.status(404).json({ error: 'Tracking order not found' });
+    }
+    const { order, items } = found;
+    const rawStatus = String(order.order_status || order.delivery_status || 'pending').trim();
+    const canonicalStatus =
+      rawStatus.toLowerCase() === 'on the way' || rawStatus.toLowerCase() === 'on_the_way'
+        ? 'On the Way'
+        : rawStatus.toLowerCase();
+
+    return res.json({
+      orderId: order.id,
+      trackingCode: order.tracking_code,
+      orderStatus: canonicalStatus,
+      deliveryStatus: canonicalStatus,
+      driverPhone: order.driver_phone || null,
+      trackingUrl: order.tracking_url || `/tracker/${order.id}`,
+      driverLat: order.driver_lat !== null && order.driver_lat !== undefined ? Number(order.driver_lat) : null,
+      driverLng: order.driver_lng !== null && order.driver_lng !== undefined ? Number(order.driver_lng) : null,
+      trackingActive: Boolean(order.tracking_active),
+      tripStartedAt: order.trip_started_at || null,
+      locationUpdatedAt: order.location_updated_at || null,
+      sellerName: order.seller_name,
+      sellerPhone: order.seller_phone || null,
+      sellerRole: order.seller_role,
+      buyerName: order.buyer_name,
+      buyerPhone: order.buyer_phone || null,
+      buyerRole: order.buyer_role,
+      deliveryAddress: order.delivery_address,
+      district: order.district,
+      totalBdt: order.total_bdt !== undefined ? Number(order.total_bdt) : 0,
+      items: items.map((it) => ({
+        cropName: it.crop_name,
+        banglaName: it.bangla_name,
+        quantityKg: Number(it.quantity_kg || 0),
+        unit: it.unit || 'kg',
+      })),
+      updatedAt: order.updated_at || null,
+    });
+  } catch (err: any) {
+    console.error('[GET /api/tracker/:orderId] error:', err);
+    return res.status(500).json({ error: 'Failed to load live tracking info' });
+  }
+});
+
+// Public endpoint: Receive driver live GPS coordinates from /tracker/:orderId
+app.post('/api/tracker/:orderId/location', async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    const latNum = Number(req.body?.lat ?? req.body?.latitude);
+    const lngNum = Number(req.body?.lng ?? req.body?.longitude);
+    const activeFlag = req.body?.active === undefined ? true : Boolean(req.body.active);
+
+    if (
+      !Number.isFinite(latNum) ||
+      !Number.isFinite(lngNum) ||
+      latNum < -90 ||
+      latNum > 90 ||
+      lngNum < -180 ||
+      lngNum > 180
+    ) {
+      return res.status(400).json({ error: 'Valid latitude and longitude coordinates are required.' });
+    }
+
+    const found = await findOrderWithItemsForTracking(orderId);
+    if (!found) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = found.order;
+    const wasTrackingActive = Boolean(order.tracking_active);
+    const currentStatusRaw = String(order.order_status || order.delivery_status || 'On the Way').trim();
+    const nextStatus =
+      currentStatusRaw.toLowerCase() === 'completed' || currentStatusRaw.toLowerCase() === 'rejected'
+        ? currentStatusRaw.toLowerCase()
+        : 'On the Way';
+
+    const nowIso = new Date().toISOString();
+    const tripStartedAt = order.trip_started_at || (activeFlag ? nowIso : null);
+
+    // Update Neon PostgreSQL when configured
+    if (isNeonConfigured) {
+      try {
+        await pool.query(
+          `UPDATE orders
+           SET driver_lat = $1,
+               driver_lng = $2,
+               tracking_active = $3,
+               trip_started_at = COALESCE(trip_started_at, $4),
+               location_updated_at = NOW(),
+               order_status = $5,
+               delivery_status = $5,
+               updated_at = NOW()
+           WHERE id = $6`,
+          [latNum, lngNum, activeFlag, activeFlag ? new Date(nowIso) : null, nextStatus, orderId]
+        );
+      } catch (neonErr: any) {
+        console.warn('[Tracker Location] Neon update warning:', neonErr?.message);
+      }
+    }
+
+    // Mirror to SQLite backup store
+    try {
+      db.prepare(
+        `UPDATE orders
+         SET driver_lat = ?,
+             driver_lng = ?,
+             tracking_active = ?,
+             trip_started_at = COALESCE(trip_started_at, ?),
+             location_updated_at = ?,
+             order_status = ?,
+             delivery_status = ?,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(
+        latNum,
+        lngNum,
+        activeFlag ? 1 : 0,
+        activeFlag ? nowIso : null,
+        nowIso,
+        nextStatus,
+        nextStatus,
+        nowIso,
+        orderId
+      );
+    } catch (sqliteErr: any) {
+      console.warn('[Tracker Location] SQLite mirror warning:', sqliteErr?.message);
+    }
+
+    const ssePayload = {
+      orderId,
+      lat: latNum,
+      lng: lngNum,
+      trackingActive: activeFlag,
+      orderStatus: nextStatus,
+      tripStartedAt,
+      locationUpdatedAt: nowIso,
+    };
+
+    const recipients = [order.seller_id, order.buyer_id].filter(Boolean) as string[];
+    for (const userId of recipients) {
+      sendSSE(userId, 'driver_location_updated', ssePayload);
+      if (!wasTrackingActive && activeFlag) {
+        sendSSE(userId, 'order_updated', {
+          orderId,
+          orderStatus: nextStatus,
+          trackingActive: true,
+          driverLat: latNum,
+          driverLng: lngNum,
+        });
+      }
+    }
+
+    if (!wasTrackingActive && activeFlag) {
+      for (const userId of recipients) {
+        try {
+          await createNeonNotification(
+            userId,
+            `লাইভ ট্র্যাকিং শুরু হয়েছে / Live Tracking Started`,
+            `ড্রাইভার অর্ডার #${orderId.slice(-8).toUpperCase()} এর লাইভ লোকেশন শেয়ার করা শুরু করেছেন। এখন ম্যাপে সরাসরি দেখতে পারেন।`,
+            'order',
+            `/orders`
+          );
+        } catch (notifErr: any) {
+          console.warn('[Tracker Location] Notification warning:', notifErr?.message);
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      orderId,
+      lat: latNum,
+      lng: lngNum,
+      trackingActive: activeFlag,
+      orderStatus: nextStatus,
+      tripStartedAt,
+      locationUpdatedAt: nowIso,
+    });
+  } catch (err: any) {
+    console.error('[POST /api/tracker/:orderId/location] error:', err);
+    return res.status(500).json({ error: 'Failed to update driver location' });
+  }
+});
 
 function formatWholesalerOfferRow(r: any) {
   return {
@@ -3782,12 +4245,18 @@ async function createNeonNotification(
 ) {
   const notifId = `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const now = new Date();
-  // Strictly persist notification to Neon PostgreSQL
-  await pool.query(
-    `INSERT INTO notifications (id, user_id, title, message, type, action_url, read, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, false, $7)`,
-    [notifId, userId, title, message, type, actionUrl || null, now]
-  );
+  if (isNeonConfigured) {
+    try {
+      // Persist notification to Neon PostgreSQL when configured
+      await pool.query(
+        `INSERT INTO notifications (id, user_id, title, message, type, action_url, read, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, false, $7)`,
+        [notifId, userId, title, message, type, actionUrl || null, now]
+      );
+    } catch (neonErr: any) {
+      console.warn('[Notifications] Neon insert warning (continuing with SSE):', neonErr?.message);
+    }
+  }
 
   const formatted = {
     id: notifId,
@@ -4221,6 +4690,10 @@ app.get('/api/notifications', requireAuth, async (req: AuthenticatedRequest, res
     const authUser = req.user!;
     const targetUserId = authUser.role === 'admin' ? (req.query.userId ? String(req.query.userId) : authUser.id) : authUser.id;
 
+    if (!isNeonConfigured) {
+      return res.json({ success: true, notifications: [] });
+    }
+
     const result = await pool.query(`
       SELECT * FROM notifications
       WHERE user_id = $1
@@ -4231,8 +4704,8 @@ app.get('/api/notifications', requireAuth, async (req: AuthenticatedRequest, res
     const notifications = result.rows.map(formatNotificationRow);
     return res.json({ success: true, notifications });
   } catch (err: any) {
-    console.error('[Notifications] Error fetching notifications from Neon:', err);
-    return res.status(500).json({ success: false, error: err.message });
+    console.warn('[Notifications] Neon notifications fallback to empty list:', err?.message);
+    return res.json({ success: true, notifications: [] });
   }
 });
 

@@ -43,6 +43,7 @@ import { OrdersView } from './components/OrdersView';
 import { ProfileModal } from './components/ProfileModal';
 import { UserProfilePage } from './components/UserProfilePage';
 import { CropDoctorModal } from './components/CropDoctorModal';
+import { DriverTrackerPage } from './components/DriverTrackerPage';
 import { VoiceAssistantModal } from './components/VoiceAssistantModal';
 import { ContactsView } from './components/ContactsView';
 import { CallModal } from './components/CallModal';
@@ -50,7 +51,23 @@ import { NoRoleAccountModal } from './components/NoRoleAccountModal';
 import { CreateRoleModal } from './components/CreateRoleModal';
 import { CheckCircle2, ShieldCheck, Phone, PhoneOff } from 'lucide-react';
 
+function extractTrackerOrderId(pathname: string): string | null {
+  const match = pathname.match(/\/tracker\/([^/?#]+)/i);
+  return match && match[1] ? decodeURIComponent(match[1]) : null;
+}
+
 export default function App() {
+  const [trackerOrderId, setTrackerOrderId] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? extractTrackerOrderId(window.location.pathname) : null
+  );
+
+  useEffect(() => {
+    const onPopState = () => {
+      setTrackerOrderId(extractTrackerOrderId(window.location.pathname));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
   // Ensure store is seeded once without demo users
   useEffect(() => {
     initializeStore();
@@ -239,13 +256,22 @@ export default function App() {
         try {
           const data = JSON.parse(e.data);
           window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: data }));
-          const statusText = data.orderStatus === 'accepted' ? (language === 'bn' ? 'অর্ডার গ্রহণ করা হয়েছে' : 'Order accepted')
-            : data.orderStatus === 'shipped' ? (language === 'bn' ? 'পণ্য ডেলিভারি পাঠানো হয়েছে' : 'Order dispatched / shipped')
-            : data.orderStatus === 'completed' ? (language === 'bn' ? 'অর্ডার ডেলিভারি সম্পন্ন হয়েছে' : 'Order delivered and completed')
-            : data.orderStatus === 'rejected' ? (language === 'bn' ? 'অর্ডার বাতিল বা প্রত্যাখ্যাত হয়েছে' : 'Order rejected')
+          const statusLower = String(data.orderStatus || '').toLowerCase();
+          const statusText = statusLower === 'accepted' ? (language === 'bn' ? 'অর্ডার গ্রহণ করা হয়েছে' : 'Order accepted')
+            : statusLower === 'on the way' || statusLower === 'on_the_way' ? (language === 'bn' ? 'ড্রাইভার ডেলিভারির পথে রওনা হয়েছেন (On the Way)' : 'Order is On the Way')
+            : statusLower === 'shipped' ? (language === 'bn' ? 'পণ্য ডেলিভারি পাঠানো হয়েছে' : 'Order dispatched / shipped')
+            : statusLower === 'completed' ? (language === 'bn' ? 'অর্ডার ডেলিভারি সম্পন্ন হয়েছে' : 'Order delivered and completed')
+            : statusLower === 'rejected' ? (language === 'bn' ? 'অর্ডার বাতিল বা প্রত্যাখ্যাত হয়েছে' : 'Order rejected')
             : (data.orderStatus || 'updated');
           setToastMessage(language === 'bn' ? `🔔 অর্ডারের স্থিতি আপডেট: ${statusText}` : `🔔 Order update: ${statusText}`);
           setTimeout(() => setToastMessage(null), 4000);
+        } catch {}
+      });
+
+      es.addEventListener('driver_location_updated', (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data);
+          window.dispatchEvent(new CustomEvent('nb_driver_location', { detail: data }));
         } catch {}
       });
       es.addEventListener('call_signal', (e: MessageEvent) => {
@@ -429,6 +455,10 @@ export default function App() {
     window.addEventListener('nb_logout', handleLogoutEvent);
     return () => window.removeEventListener('nb_logout', handleLogoutEvent);
   }, []);
+
+  if (trackerOrderId) {
+    return <DriverTrackerPage orderId={trackerOrderId} />;
+  }
 
   if (isAuthChecking) {
     return (

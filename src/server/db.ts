@@ -95,6 +95,13 @@ export function initDatabase() {
       district TEXT NOT NULL,
       tracking_code TEXT NOT NULL,
       notes TEXT,
+      driver_phone TEXT,
+      tracking_url TEXT,
+      driver_lat REAL,
+      driver_lng REAL,
+      tracking_active INTEGER DEFAULT 0,
+      trip_started_at TEXT,
+      location_updated_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -166,17 +173,56 @@ export function initDatabase() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS sms_logs (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      recipient_phone TEXT NOT NULL,
+      message_body TEXT NOT NULL,
+      tracking_url TEXT,
+      provider TEXT DEFAULT 'mock-sms-gateway',
+      status TEXT DEFAULT 'sent',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token_hash TEXT UNIQUE NOT NULL,
+      role TEXT NOT NULL,
+      ip_address TEXT,
+      user_agent TEXT,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_products_target_role ON products(target_role);
     CREATE INDEX IF NOT EXISTS idx_products_seller_role ON products(seller_role);
     CREATE INDEX IF NOT EXISTS idx_products_district ON products(district);
     CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id);
     CREATE INDEX IF NOT EXISTS idx_orders_seller ON orders(seller_id);
     CREATE INDEX IF NOT EXISTS idx_market_district ON market_prices(district);
+    CREATE INDEX IF NOT EXISTS idx_sms_logs_order_id ON sms_logs(order_id);
+    CREATE INDEX IF NOT EXISTS idx_sqlite_sessions_token_hash ON sessions(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_sqlite_sessions_user_id ON sessions(user_id);
   `);
 
   try {
     db.prepare("ALTER TABLE orders ADD COLUMN order_status TEXT DEFAULT 'pending'").run();
   } catch {}
+  for (const colDef of [
+    "driver_phone TEXT",
+    "tracking_url TEXT",
+    "driver_lat REAL",
+    "driver_lng REAL",
+    "tracking_active INTEGER DEFAULT 0",
+    "trip_started_at TEXT",
+    "location_updated_at TEXT",
+  ]) {
+    try {
+      db.prepare(`ALTER TABLE orders ADD COLUMN ${colDef}`).run();
+    } catch {}
+  }
   try {
     db.prepare("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT 'kg'").run();
   } catch {}

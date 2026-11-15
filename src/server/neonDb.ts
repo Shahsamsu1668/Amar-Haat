@@ -17,6 +17,8 @@ const activeConnectionString = (process.env.NODE_ENV === 'production'
   ? (process.env.DATABASE_URL || process.env.DATABASE_URL_UNPOOLED)
   : (process.env.TEST_DATABASE_URL || process.env.DATABASE_URL)) || process.env.DATABASE_URL;
 
+export const isNeonConfigured = Boolean(activeConnectionString && String(activeConnectionString).trim());
+
 export const pool = new Pool({
   connectionString: activeConnectionString,
   ssl: {
@@ -32,6 +34,10 @@ pool.on('error', (err) => {
 });
 
 export async function initNeonDatabase(): Promise<void> {
+  if (!isNeonConfigured) {
+    console.info('[Neon] DATABASE_URL not configured; using local SQLite fallback.');
+    return;
+  }
   const client = await pool.connect();
   try {
     // 1. Users table in Neon PostgreSQL
@@ -211,6 +217,25 @@ export async function initNeonDatabase(): Promise<void> {
         CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id);
         CREATE INDEX IF NOT EXISTS idx_orders_seller ON orders(seller_id);
         CREATE INDEX IF NOT EXISTS idx_orders_order_status ON orders(order_status);
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_phone TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_url TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_lat DOUBLE PRECISION;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_lng DOUBLE PRECISION;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_active BOOLEAN DEFAULT FALSE;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS trip_started_at TIMESTAMPTZ;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ;
+
+        CREATE TABLE IF NOT EXISTS sms_logs (
+          id TEXT PRIMARY KEY,
+          order_id TEXT NOT NULL,
+          recipient_phone TEXT NOT NULL,
+          message_body TEXT NOT NULL,
+          tracking_url TEXT,
+          provider TEXT DEFAULT 'mock-sms-gateway',
+          status TEXT DEFAULT 'sent',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_sms_logs_order_id ON sms_logs(order_id);
       `);
     } catch (err: any) {
       console.warn('[Neon] orders table init warning:', err.message);

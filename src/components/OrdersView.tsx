@@ -25,7 +25,11 @@ import {
   ShoppingBag,
   Layers,
   ArrowRight,
+  Navigation,
+  Radio,
 } from 'lucide-react';
+import { DispatchDriverModal } from './DispatchDriverModal';
+import { LiveTrackingModal } from './LiveTrackingModal';
 
 interface OrdersViewProps {
   currentUser: User | null;
@@ -49,6 +53,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
 
   const [orders, setOrders] = useState<SupplyChainOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dispatchOrderTarget, setDispatchOrderTarget] = useState<SupplyChainOrder | null>(null);
+  const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
 
   const t = (en: string, bn: string) => (language === 'bn' ? bn : en);
   const formatNum = (val: number | string | null | undefined): string => {
@@ -93,9 +99,29 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
     const handleOrderEvent = () => {
       loadOrders();
     };
+    const handleDriverLocationEvent = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (!detail?.orderId) return;
+      setOrders((prev) =>
+        prev.map((ord) =>
+          ord.id === detail.orderId
+            ? {
+                ...ord,
+                driverLat: detail.lat !== undefined ? Number(detail.lat) : ord.driverLat,
+                driverLng: detail.lng !== undefined ? Number(detail.lng) : ord.driverLng,
+                trackingActive: detail.trackingActive ?? true,
+                orderStatus: (detail.orderStatus || ord.orderStatus) as OrderLifecycleStatus,
+                locationUpdatedAt: detail.locationUpdatedAt || new Date().toISOString(),
+              }
+            : ord
+        )
+      );
+    };
     window.addEventListener('nb_order_updated', handleOrderEvent);
+    window.addEventListener('nb_driver_location', handleDriverLocationEvent);
     return () => {
       window.removeEventListener('nb_order_updated', handleOrderEvent);
+      window.removeEventListener('nb_driver_location', handleDriverLocationEvent);
     };
   }, []);
 
@@ -248,6 +274,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
         </span>
       );
     }
+    if (s === 'on the way' || s === 'on_the_way') {
+      return (
+        <span className="bg-indigo-100 text-indigo-800 text-[11px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-indigo-200">
+          <Truck className="w-3 h-3" /> {t('On the Way', 'পথে রয়েছে (On the Way)')}
+        </span>
+      );
+    }
     if (s === 'shipped' || s === 'dispatched') {
       return (
         <span className="bg-purple-100 text-purple-800 text-[11px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-purple-200">
@@ -346,6 +379,43 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
 
 
       {/* Toast Notification */}
+      {dispatchOrderTarget && (
+        <DispatchDriverModal
+          order={dispatchOrderTarget}
+          language={language}
+          onClose={() => setDispatchOrderTarget(null)}
+          onDispatched={() => {
+            loadOrders();
+            showToast(
+              t('Order marked On the Way & SMS sent to driver!', 'অর্ডার ডেলিভারিতে পাঠানো হয়েছে এবং ড্রাইভারকে এসএমএস দেওয়া হয়েছে!')
+            );
+          }}
+        />
+      )}
+
+      {trackingOrderTarget && (
+        <LiveTrackingModal
+          order={trackingOrderTarget}
+          language={language}
+          onClose={() => setTrackingOrderTarget(null)}
+          onOrderSync={(info) => {
+            setOrders((prev) =>
+              prev.map((ord) =>
+                ord.id === info.orderId
+                  ? {
+                      ...ord,
+                      driverLat: info.driverLat ?? ord.driverLat,
+                      driverLng: info.driverLng ?? ord.driverLng,
+                      trackingActive: info.trackingActive,
+                      locationUpdatedAt: info.locationUpdatedAt || ord.locationUpdatedAt,
+                    }
+                  : ord
+              )
+            );
+          }}
+        />
+      )}
+
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 bg-stone-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold border border-stone-700 animate-fade-in">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -667,12 +737,45 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                           if (cStat === 'accepted') {
                             return (
                               <button
-                                onClick={() => handleUpdateStatus(order.id, 'shipped')}
-                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                                onClick={() => setDispatchOrderTarget(order)}
+                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
                               >
                                 <Truck className="w-3.5 h-3.5" />
-                                <span>{t('Mark as Delivered', 'ডেলিভারি করা হয়েছে')}</span>
+                                <span>{t('Out for Delivery', 'ডেলিভারিতে দেয়া হয়েছে')}</span>
                               </button>
+                            );
+                          }
+                          if (cStat === 'on the way' || cStat === 'on_the_way') {
+                            return (
+                              <div className="flex flex-wrap items-center gap-2">
+                                {order.driverPhone && (
+                                  <span className="text-[11px] font-semibold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1">
+                                    <Phone className="w-3 h-3" />
+                                    {order.driverPhone}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={!order.trackingActive}
+                                  onClick={() => setTrackingOrderTarget(order)}
+                                  className={`font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition ${
+                                    order.trackingActive
+                                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs cursor-pointer'
+                                      : 'bg-stone-100 text-stone-400 border border-stone-200 cursor-not-allowed'
+                                  }`}
+                                >
+                                  {order.trackingActive ? (
+                                    <Radio className="w-3.5 h-3.5 animate-pulse" />
+                                  ) : (
+                                    <Navigation className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>
+                                    {order.trackingActive
+                                      ? t('Track Order', 'লাইভ ট্র্যাক করুন')
+                                      : t('Track Order (Waiting GPS)', 'লাইভ ট্র্যাক করুন (জিপিএস অপেক্ষায়)')}
+                                  </span>
+                                </button>
+                              </div>
                             );
                           }
                           if (cStat === 'shipped' || cStat === 'dispatched') {
@@ -716,15 +819,45 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                               </span>
                             );
                           }
-                          if (cStat === 'shipped' || cStat === 'dispatched') {
+                          if (
+                            cStat === 'shipped' ||
+                            cStat === 'dispatched' ||
+                            cStat === 'on the way' ||
+                            cStat === 'on_the_way'
+                          ) {
                             return (
-                              <button
-                                onClick={() => handleUpdateStatus(order.id, 'completed')}
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>{t('Mark as Received', 'ডেলিভারি গ্রহণ করেছি')}</span>
-                              </button>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {(cStat === 'on the way' || cStat === 'on_the_way') && (
+                                  <button
+                                    type="button"
+                                    disabled={!order.trackingActive}
+                                    onClick={() => setTrackingOrderTarget(order)}
+                                    className={`font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition ${
+                                      order.trackingActive
+                                        ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs cursor-pointer'
+                                        : 'bg-stone-100 text-stone-400 border border-stone-200 cursor-not-allowed'
+                                    }`}
+                                  >
+                                    {order.trackingActive ? (
+                                      <Radio className="w-3.5 h-3.5 animate-pulse" />
+                                    ) : (
+                                      <Navigation className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>
+                                      {order.trackingActive
+                                        ? t('Track Order', 'লাইভ ট্র্যাক করুন')
+                                        : t('Track Order (Waiting GPS)', 'লাইভ ট্র্যাক করুন (জিপিএস অপেক্ষায়)')}
+                                    </span>
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleUpdateStatus(order.id, 'completed')}
+                                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  <span>{t('Mark as Received', 'ডেলিভারি গ্রহণ করেছি')}</span>
+                                </button>
+                              </div>
                             );
                           }
                           if (cStat === 'completed' || cStat === 'delivered') {

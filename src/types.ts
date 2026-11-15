@@ -222,6 +222,9 @@ export type OrderLifecycleStatus =
   | 'accepted'
   | 'rejected'
   | 'shipped'
+  | 'On the Way'
+  | 'on the way'
+  | 'on_the_way'
   | 'completed'
   | 'Confirmed'
   | 'Processing'
@@ -261,9 +264,67 @@ export interface SupplyChainOrder {
   deliveryAddress: string;
   district: string;
   trackingCode: string;
+  driverPhone?: string;
+  trackingUrl?: string;
+  driverLat?: number;
+  driverLng?: number;
+  trackingActive?: boolean;
+  tripStartedAt?: string;
+  locationUpdatedAt?: string;
   notes?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface TrackerOrderInfo {
+  orderId: string;
+  trackingCode: string;
+  orderStatus: OrderLifecycleStatus | string;
+  deliveryStatus: string;
+  driverPhone: string | null;
+  trackingUrl: string;
+  driverLat: number | null;
+  driverLng: number | null;
+  trackingActive: boolean;
+  tripStartedAt: string | null;
+  locationUpdatedAt: string | null;
+  sellerName: string;
+  sellerPhone: string | null;
+  sellerRole: string;
+  buyerName: string;
+  buyerPhone: string | null;
+  buyerRole: string;
+  deliveryAddress: string;
+  district: string;
+  totalBdt: number;
+  items: Array<{
+    cropName: string;
+    banglaName?: string;
+    quantityKg: number;
+    unit?: string;
+  }>;
+  updatedAt: string | null;
+}
+
+export interface DispatchOrderResponse {
+  success: boolean;
+  message: string;
+  orderId: string;
+  orderStatus: string;
+  driverPhone: string;
+  trackingPath: string;
+  trackingUrl: string;
+  sms?: {
+    id: string;
+    success: boolean;
+    provider: string;
+    status: string;
+    normalizedPhone: string;
+    trackingUrl: string;
+    messageBody: string;
+    sentAt: string;
+    simulated: boolean;
+  };
 }
 
 // ─── CUSTOMER PRODUCT ────────────────────────────────────────────────────
