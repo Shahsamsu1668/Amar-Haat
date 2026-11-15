@@ -51,11 +51,17 @@ import {
   ExternalLink,
   Navigation,
   Radio,
+  FileText,
 } from 'lucide-react';
 import { requestMarketPrediction, MarketPredictionResult } from '../services/aiService';
 import { toBanglaNumber, toBanglaDistrict } from './Header';
 import { DispatchDriverModal } from './DispatchDriverModal';
 import { LiveTrackingModal } from './LiveTrackingModal';
+import {
+  DigitalChallanModal,
+  challanFromOrder,
+  isChallanEligibleStatus,
+} from './DigitalChallanModal';
 
 interface FarmerDashboardProps {
   currentUser: User;
@@ -183,6 +189,7 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [dispatchOrderTarget, setDispatchOrderTarget] = useState<SupplyChainOrder | null>(null);
   const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
+  const [challanOrderTarget, setChallanOrderTarget] = useState<SupplyChainOrder | null>(null);
 
   // Add Product Form (Dynamic Manual Entry, Image Upload & Unit Selection)
   const [showAddModal, setShowAddModal] = useState(false);
@@ -414,7 +421,8 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
       showLedgerModal ||
       Boolean(confirmDialog) ||
       Boolean(dispatchOrderTarget) ||
-      Boolean(trackingOrderTarget)
+      Boolean(trackingOrderTarget) ||
+      Boolean(challanOrderTarget)
     ) {
       document.body.style.overflow = 'hidden';
     } else {
@@ -423,7 +431,7 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
     return () => {
       document.body.style.overflow = '';
     };
-  }, [showAddModal, showLedgerModal, confirmDialog, dispatchOrderTarget, trackingOrderTarget]);
+  }, [showAddModal, showLedgerModal, confirmDialog, dispatchOrderTarget, trackingOrderTarget, challanOrderTarget]);
 
   // AI Price Recommendation
   const handlePredictPrice = async () => {
@@ -1045,6 +1053,18 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                         <span className="text-xs text-rose-700 font-semibold bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200">
                           {t('Order Rejected / Cancelled', 'অর্ডার বাতিল')}
                         </span>
+                      )}
+
+                      {/* Auto Digital Challan button once order is On the Way or Delivered */}
+                      {isChallanEligibleStatus(currentStatus) && (
+                        <button
+                          type="button"
+                          onClick={() => setChallanOrderTarget(order)}
+                          className="bg-stone-800 hover:bg-stone-900 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 shadow-2xs cursor-pointer transition"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>{t('View Challan', 'চালান দেখুন')}</span>
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1695,6 +1715,15 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
               )
             );
           }}
+        />
+      )}
+
+      {/* Auto Digital Challan Modal (Read-only) */}
+      {challanOrderTarget && (
+        <DigitalChallanModal
+          challan={challanFromOrder(challanOrderTarget)}
+          language={language}
+          onClose={() => setChallanOrderTarget(null)}
         />
       )}
 

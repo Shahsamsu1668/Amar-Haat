@@ -11,10 +11,14 @@ import {
   StopCircle,
   Globe,
   ExternalLink,
+  FileText,
+  KeyRound,
+  ShieldCheck,
 } from 'lucide-react';
 import { TrackerOrderInfo, Language } from '../types';
 import { orderApi } from '../services/api';
 import { TrackingMapView } from './TrackingMapView';
+import { DigitalChallanModal, challanFromTrackerInfo } from './DigitalChallanModal';
 
 interface DriverTrackerPageProps {
   orderId: string;
@@ -41,6 +45,13 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
   const [pushCount, setPushCount] = useState(0);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [pushingNow, setPushingNow] = useState(false);
+
+  // Transparent Transit: Digital Challan + Secured 4-digit OTP Handover
+  const [showChallanModal, setShowChallanModal] = useState(false);
+  const [deliveryPinInput, setDeliveryPinInput] = useState('');
+  const [completingDelivery, setCompletingDelivery] = useState(false);
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [completionSuccess, setCompletionSuccess] = useState<string | null>(null);
 
   const watchIdRef = useRef<number | null>(null);
   const intervalIdRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -239,6 +250,61 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
     }, 7000);
   };
 
+  const handleCompleteDelivery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = deliveryPinInput
+      .replace(/[০-৯]/g, (d) => String('০১২৩৪৫৬৭৮৯'.indexOf(d)))
+      .replace(/\D/g, '')
+      .slice(0, 4);
+
+    if (cleaned.length !== 4) {
+      setCompletionError(
+        t(
+          'Please enter the 4-digit Delivery PIN collected from the wholesaler.',
+          'পাইকারের কাছ থেকে পাওয়া ৪ সংখ্যার ডেলিভারি পিনটি লিখুন।'
+        )
+      );
+      return;
+    }
+
+    setCompletionError(null);
+    setCompletingDelivery(true);
+    try {
+      const res = await orderApi.completeDeliveryWithPin(orderId, cleaned);
+      clearTrackingTimers();
+      setAcquiringGps(false);
+      setSharing(false);
+      setOrderInfo((prev) =>
+        prev
+          ? {
+              ...prev,
+              orderStatus: res.orderStatus,
+              deliveryStatus: res.deliveryStatus,
+              trackingActive: false,
+              deliveredAt: res.deliveredAt,
+            }
+          : prev
+      );
+      setDeliveryPinInput('');
+      setCompletionSuccess(
+        t(
+          'Delivery PIN verified! Order marked as Delivered and live GPS tracking has stopped.',
+          'ডেলিভারি পিন যাচাই সম্পন্ন! অর্ডারটি "ডেলিভারি সম্পন্ন" হয়েছে এবং লাইভ জিপিএস বন্ধ করা হয়েছে।'
+        )
+      );
+    } catch (err: any) {
+      setCompletionError(
+        err?.message ||
+          t(
+            'Incorrect Delivery PIN. Please verify the 4-digit PIN with the wholesaler.',
+            'ভুল ডেলিভারি পিন। অনুগ্রহ করে পাইকারের কাছ থেকে সঠিক ৪ সংখ্যার পিন যাচাই করুন।'
+          )
+      );
+    } finally {
+      setCompletingDelivery(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
@@ -273,6 +339,11 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
   const mapsDestUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
     `${orderInfo.deliveryAddress}, ${orderInfo.district}, Bangladesh`
   )}`;
+  const orderStatusLower = String(orderInfo.orderStatus || orderInfo.deliveryStatus || '')
+    .trim()
+    .toLowerCase();
+  const isDelivered = orderStatusLower === 'delivered' || orderStatusLower === 'completed';
+  const isRejected = orderStatusLower === 'rejected' || orderStatusLower === 'cancelled';
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-emerald-50 via-white to-slate-50 pb-10">
@@ -310,14 +381,28 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
           <div className="flex items-center justify-between gap-2">
             <span
               className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
-                sharing
+                isDelivered
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : isRejected
+                  ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                  : sharing
                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                   : acquiringGps
                   ? 'bg-blue-100 text-blue-800 border border-blue-200'
                   : 'bg-amber-100 text-amber-800 border border-amber-200'
               }`}
             >
-              {sharing ? (
+              {isDelivered ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  {t('DELIVERED', 'ডেলিভারি সম্পন্ন')}
+                </>
+              ) : isRejected ? (
+                <>
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+                  {t('CANCELLED / REJECTED', 'অর্ডার বাতিল')}
+                </>
+              ) : sharing ? (
                 <>
                   <Radio className="w-3.5 h-3.5 animate-pulse text-emerald-600" />
                   {t('LIVE GPS BROADCASTING', 'লাইভ জিপিএস চালু আছে')}
@@ -335,12 +420,39 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
               )}
             </span>
 
-            <span className="text-xs font-bold text-slate-500">
-              {orderInfo.orderStatus}
-            </span>
+            <button
+              type="button"
+              onClick={() => setShowChallanModal(true)}
+              className="px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>{t('View Challan', 'চালান দেখুন')}</span>
+            </button>
           </div>
 
-          {!sharing ? (
+          {isDelivered ? (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div className="space-y-1 text-xs">
+                <p className="font-extrabold text-emerald-900 text-sm">
+                  {t('Delivered (ডেলিভারি সম্পন্ন)', 'ডেলিভারি সম্পন্ন (Delivered)')}
+                </p>
+                <p className="text-emerald-700">
+                  {completionSuccess ||
+                    t(
+                      'Handover confirmed with Wholesaler PIN. Active GPS tracking has stopped.',
+                      'পাইকারের পিন যাচাইয়ের মাধ্যমে ডেলিভারি সম্পন্ন হয়েছে ও লাইভ জিপিএস ট্র্যাকিং বন্ধ করা হয়েছে।'
+                    )}
+                </p>
+              </div>
+            </div>
+          ) : isRejected ? (
+            <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-xs text-rose-700 font-semibold">
+              {t('This order was cancelled or rejected.', 'এই অর্ডারটি বাতিল করা হয়েছে।')}
+            </div>
+          ) : !sharing ? (
             <div className="space-y-2.5">
               <button
                 type="button"
@@ -404,6 +516,70 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
             </div>
           )}
         </div>
+
+        {/* Secured OTP Handover Card ("Complete Delivery / ডেলিভারি সম্পন্ন করুন") */}
+        {!isDelivered && !isRejected && (
+          <form
+            onSubmit={handleCompleteDelivery}
+            className="bg-white rounded-3xl p-5 shadow-md border border-amber-200 space-y-3.5"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <KeyRound className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="font-bold text-slate-900 text-sm">
+                  {t('Complete Delivery', 'ডেলিভারি সম্পন্ন করুন')}
+                </h2>
+                <p className="text-[11px] text-slate-600">
+                  {t(
+                    'Collect the 4-digit Delivery PIN from the Wholesaler upon arrival and submit below.',
+                    'পণ্য হস্তান্তরের সময় পাইকারের কাছ থেকে ৪ সংখ্যার ডেলিভারি পিনটি সংগ্রহ করে নিচে জমা দিন।'
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5">
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={4}
+                aria-label={t('Complete Delivery PIN', 'ডেলিভারি পিন')}
+                value={deliveryPinInput}
+                onChange={(e) => {
+                  const normalized = e.target.value
+                    .replace(/[০-৯]/g, (d) => String('০১২৩৪৫৬৭৮৯'.indexOf(d)))
+                    .replace(/\D/g, '')
+                    .slice(0, 4);
+                  setDeliveryPinInput(normalized);
+                  if (completionError) setCompletionError(null);
+                }}
+                placeholder={t('4-digit Delivery PIN', '৪ সংখ্যার পিন লিখুন')}
+                className="flex-1 px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-emerald-500 focus:outline-none text-center font-mono font-black text-lg tracking-[0.35em] text-slate-900 placeholder:text-xs placeholder:tracking-normal placeholder:font-sans placeholder:font-medium"
+              />
+              <button
+                type="submit"
+                disabled={completingDelivery || deliveryPinInput.length !== 4}
+                className="px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-sm cursor-pointer transition"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {completingDelivery
+                    ? t('Verifying...', 'যাচাই হচ্ছে...')
+                    : t('Complete Delivery', 'ডেলিভারি সম্পন্ন করুন')}
+                </span>
+              </button>
+            </div>
+
+            {completionError && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-700 font-medium flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{completionError}</span>
+              </div>
+            )}
+          </form>
+        )}
 
         {/* Live Map Preview for Driver */}
         {currentCoords && (
@@ -502,6 +678,14 @@ export const DriverTrackerPage: React.FC<DriverTrackerPageProps> = ({ orderId })
           )}
         </div>
       </main>
+
+      {showChallanModal && (
+        <DigitalChallanModal
+          challan={challanFromTrackerInfo(orderInfo)}
+          language={language}
+          onClose={() => setShowChallanModal(false)}
+        />
+      )}
     </div>
   );
 };

@@ -271,6 +271,9 @@ export interface SupplyChainOrder {
   trackingActive?: boolean;
   tripStartedAt?: string;
   locationUpdatedAt?: string;
+  dispatchedAt?: string;
+  deliveredAt?: string;
+  deliveryPin?: string;
   notes?: string;
   createdAt: string;
   updatedAt?: string;
@@ -302,7 +305,12 @@ export interface TrackerOrderInfo {
     banglaName?: string;
     quantityKg: number;
     unit?: string;
+    unitPrice?: number;
+    subtotal?: number;
   }>;
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
+  createdAt?: string | null;
   updatedAt: string | null;
 }
 
@@ -314,6 +322,7 @@ export interface DispatchOrderResponse {
   driverPhone: string;
   trackingPath: string;
   trackingUrl: string;
+  dispatchedAt?: string;
   sms?: {
     id: string;
     success: boolean;

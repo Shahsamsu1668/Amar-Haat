@@ -259,6 +259,24 @@ export const orderApi = {
       body: JSON.stringify({ lat, lng, active }),
     });
   },
+
+  async completeDeliveryWithPin(
+    orderId: string,
+    pin: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+    orderId: string;
+    orderStatus: string;
+    deliveryStatus: string;
+    trackingActive: boolean;
+    deliveredAt: string;
+  }> {
+    return fetchJson(`/api/tracker/${encodeURIComponent(orderId)}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ pin }),
+    });
+  },
 };
 
 // ─── FARMER-ONLY INTELLIGENCE & WHOLESALER BIDS API ──────────────────────────

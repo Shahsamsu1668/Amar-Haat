@@ -102,6 +102,9 @@ export function initDatabase() {
       tracking_active INTEGER DEFAULT 0,
       trip_started_at TEXT,
       location_updated_at TEXT,
+      dispatched_at TEXT,
+      delivery_pin TEXT,
+      delivered_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -218,6 +221,9 @@ export function initDatabase() {
     "tracking_active INTEGER DEFAULT 0",
     "trip_started_at TEXT",
     "location_updated_at TEXT",
+    "dispatched_at TEXT",
+    "delivery_pin TEXT",
+    "delivered_at TEXT",
   ]) {
     try {
       db.prepare(`ALTER TABLE orders ADD COLUMN ${colDef}`).run();

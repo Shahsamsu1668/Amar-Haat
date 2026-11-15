@@ -35,8 +35,15 @@ import {
   Filter,
   Navigation,
   Radio,
+  FileText,
+  KeyRound,
 } from 'lucide-react';
 import { LiveTrackingModal } from './LiveTrackingModal';
+import {
+  DigitalChallanModal,
+  challanFromOrder,
+  isChallanEligibleStatus,
+} from './DigitalChallanModal';
 
 interface WholesalerDashboardProps {
   currentUser: User;
@@ -107,6 +114,7 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
   const [farmerOrders, setFarmerOrders] = useState<SupplyChainOrder[]>([]);
   const [farmerOrdersLoading, setFarmerOrdersLoading] = useState(false);
   const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
+  const [challanOrderTarget, setChallanOrderTarget] = useState<SupplyChainOrder | null>(null);
 
   const [tenderForm, setTenderForm] = useState({
     cropName: '',
@@ -247,7 +255,8 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
       showAddBatchModal ||
       Boolean(selectedCropToBuy) ||
       Boolean(confirmDialog) ||
-      Boolean(trackingOrderTarget)
+      Boolean(trackingOrderTarget) ||
+      Boolean(challanOrderTarget)
     ) {
       document.body.style.overflow = 'hidden';
     } else {
@@ -256,7 +265,7 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
     return () => {
       document.body.style.overflow = '';
     };
-  }, [showAddBatchModal, selectedCropToBuy, confirmDialog, trackingOrderTarget]);
+  }, [showAddBatchModal, selectedCropToBuy, confirmDialog, trackingOrderTarget, challanOrderTarget]);
 
   // Execute Wholesale Purchase from Farmer (Farmer -> Wholesaler)
   const handleExecuteFarmerPurchase = async (e: React.FormEvent) => {
@@ -991,6 +1000,29 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
                         {t('Items', 'পণ্য')}: {order.items.map(it => `${language === 'bn' ? it.banglaName || it.cropName : it.cropName} (${it.quantityKg} কেজি)`).join(', ')}
                       </div>
                     )}
+
+                    {/* Secured 4-digit Handover OTP PIN — Visible ONLY on Wholesaler's Dashboard */}
+                    {(currentStatus === 'on the way' ||
+                      currentStatus === 'on_the_way' ||
+                      currentStatus === 'shipped' ||
+                      currentStatus === 'dispatched') &&
+                      order.deliveryPin && (
+                        <div className="inline-flex flex-wrap items-center gap-1.5 mt-1 px-2.5 py-1.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 font-bold text-xs shadow-2xs">
+                          <KeyRound className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span>
+                            {language === 'bn'
+                              ? 'ডেলিভারি পিন / Delivery PIN'
+                              : 'Delivery PIN / ডেলিভারি পিন'}
+                            :
+                          </span>
+                          <span className="font-mono font-black text-sm tracking-widest text-amber-950 bg-white px-2 py-0.5 rounded-lg border border-amber-200">
+                            {order.deliveryPin}
+                          </span>
+                          <span className="text-[10px] font-medium text-amber-700">
+                            ({t('Share with driver upon arrival', 'পণ্য বুঝে পেলে ড্রাইভারকে দিন')})
+                          </span>
+                        </div>
+                      )}
                   </div>
 
                   <div className="flex items-center gap-3">
@@ -1072,6 +1104,18 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
                         <span className="text-xs text-rose-700 font-semibold bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200">
                           ❌ {t('Order Rejected', 'অর্ডার বাতিল')}
                         </span>
+                      )}
+
+                      {/* Auto Digital Challan button once order is On the Way or Delivered */}
+                      {isChallanEligibleStatus(currentStatus) && (
+                        <button
+                          type="button"
+                          onClick={() => setChallanOrderTarget(order)}
+                          className="bg-stone-800 hover:bg-stone-900 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 shadow-2xs cursor-pointer transition"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>{t('View Challan', 'চালান দেখুন')}</span>
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1843,6 +1887,15 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
               )
             );
           }}
+        />
+      )}
+
+      {/* Auto Digital Challan Modal (Read-only) */}
+      {challanOrderTarget && (
+        <DigitalChallanModal
+          challan={challanFromOrder(challanOrderTarget)}
+          language={language}
+          onClose={() => setChallanOrderTarget(null)}
         />
       )}
 

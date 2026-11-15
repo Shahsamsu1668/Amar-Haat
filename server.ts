@@ -1538,6 +1538,28 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
+function normalizeCanonicalOrderStatus(rawStatus: unknown): string {
+  const lower = String(rawStatus || 'pending').trim().toLowerCase();
+  if (lower === 'on the way' || lower === 'on_the_way') return 'On the Way';
+  if (lower === 'delivered') return 'Delivered';
+  return lower;
+}
+
+function normalizeOtpPinDigits(rawPin: unknown): string {
+  const bnToEn = String(rawPin ?? '').replace(/[০-৯]/g, (d) =>
+    String('০১২৩৪৫৬৭৮৯'.indexOf(d))
+  );
+  return bnToEn.replace(/[\s-]/g, '').trim();
+}
+
+function canIncludeDeliveryPinForViewer(orderRow: any, authUser: { id: string; role: string }): boolean {
+  if (authUser.role === 'admin') return true;
+  return (
+    orderRow.buyer_id === authUser.id &&
+    String(orderRow.buyer_role || '').toLowerCase() === 'wholesaler'
+  );
+}
+
 function formatOrderItemOutput(it: any) {
   return {
     id: it.id,
@@ -1551,12 +1573,8 @@ function formatOrderItemOutput(it: any) {
   };
 }
 
-function formatOrderOutput(o: any, items: any[]) {
-  const rawStatus = String(o.order_status || o.delivery_status || 'pending').trim();
-  const canonicalStatus =
-    rawStatus.toLowerCase() === 'on the way' || rawStatus.toLowerCase() === 'on_the_way'
-      ? 'On the Way'
-      : rawStatus.toLowerCase();
+function formatOrderOutput(o: any, items: any[], options?: { includeDeliveryPin?: boolean }) {
+  const canonicalStatus = normalizeCanonicalOrderStatus(o.order_status || o.delivery_status || 'pending');
   return {
     id: o.id,
     orderType: o.order_type,
@@ -1585,6 +1603,11 @@ function formatOrderOutput(o: any, items: any[]) {
     trackingActive: Boolean(o.tracking_active),
     tripStartedAt: o.trip_started_at || undefined,
     locationUpdatedAt: o.location_updated_at || undefined,
+    dispatchedAt: o.dispatched_at || undefined,
+    deliveredAt: o.delivered_at || undefined,
+    ...(options?.includeDeliveryPin && o.delivery_pin
+      ? { deliveryPin: String(o.delivery_pin) }
+      : {}),
     notes: o.notes,
     createdAt: o.created_at,
     updatedAt: o.updated_at,
@@ -1650,7 +1673,11 @@ app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
         itemsByOrderId.get(it.order_id)!.push(formatOrderItemOutput(it));
       }
 
-      const fullOrders = orderRows.map((o) => formatOrderOutput(o, itemsByOrderId.get(o.id) || []));
+      const fullOrders = orderRows.map((o) =>
+        formatOrderOutput(o, itemsByOrderId.get(o.id) || [], {
+          includeDeliveryPin: canIncludeDeliveryPinForViewer(o, authUser),
+        })
+      );
       return res.json({ success: true, orders: fullOrders, total: fullOrders.length });
     } catch (err: any) {
       console.warn('[Orders] Neon GET /api/orders failed, falling back to SQLite:', err?.message || err);
@@ -1703,7 +1730,11 @@ app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
       itemsByOrderId.get(it.order_id)!.push(formatOrderItemOutput(it));
     }
 
-    const fullOrders = orderRows.map((o) => formatOrderOutput(o, itemsByOrderId.get(o.id) || []));
+    const fullOrders = orderRows.map((o) =>
+      formatOrderOutput(o, itemsByOrderId.get(o.id) || [], {
+        includeDeliveryPin: canIncludeDeliveryPinForViewer(o, authUser),
+      })
+    );
     return res.json({ success: true, orders: fullOrders, total: fullOrders.length });
   } catch (sqliteErr: any) {
     console.error('[Orders] SQLite GET /api/orders error:', sqliteErr);
@@ -1775,8 +1806,11 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
             client.release();
           }
         } else {
+          const isTerminalDelivered = targetStatus === 'completed' || targetStatus === 'Delivered';
           await pool.query(
-            'UPDATE orders SET delivery_status = $1, order_status = $1, updated_at = NOW() WHERE id = $2',
+            isTerminalDelivered
+              ? 'UPDATE orders SET delivery_status = $1, order_status = $1, tracking_active = FALSE, delivered_at = COALESCE(delivered_at, NOW()), updated_at = NOW() WHERE id = $2'
+              : 'UPDATE orders SET delivery_status = $1, order_status = $1, updated_at = NOW() WHERE id = $2',
             [targetStatus, id]
           );
           updatedInNeon = true;
@@ -1799,8 +1833,15 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
           ).run(item.quantity_kg, item.quantity_kg, item.product_id);
         }
       }
-      db.prepare('UPDATE orders SET delivery_status = ?, order_status = ?, updated_at = ? WHERE id = ?')
-        .run(targetStatus, targetStatus, nowIso, id);
+      const isTerminalDelivered = targetStatus === 'completed' || targetStatus === 'Delivered';
+      if (isTerminalDelivered) {
+        db.prepare(
+          'UPDATE orders SET delivery_status = ?, order_status = ?, tracking_active = 0, delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?'
+        ).run(targetStatus, targetStatus, nowIso, nowIso, id);
+      } else {
+        db.prepare('UPDATE orders SET delivery_status = ?, order_status = ?, updated_at = ? WHERE id = ?')
+          .run(targetStatus, targetStatus, nowIso, id);
+      }
     } catch (sqliteErr: any) {
       if (!updatedInNeon) {
         throw sqliteErr;
@@ -1896,7 +1937,7 @@ async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: 
       const orderRes = await pool.query('SELECT * FROM orders WHERE id = $1 LIMIT 1', [orderId]);
       if (orderRes.rows.length > 0) {
         const itemsRes = await pool.query(
-          'SELECT crop_name, bangla_name, quantity_kg, unit FROM order_items WHERE order_id = $1',
+          'SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = $1',
           [orderId]
         );
         return { order: orderRes.rows[0], items: itemsRes.rows };
@@ -1910,7 +1951,7 @@ async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: 
     const sqliteOrder = db.prepare('SELECT * FROM orders WHERE id = ? LIMIT 1').get(orderId) as any;
     if (sqliteOrder) {
       const sqliteItems = db
-        .prepare('SELECT crop_name, bangla_name, quantity_kg, unit FROM order_items WHERE order_id = ?')
+        .prepare('SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = ?')
         .all(orderId) as any[];
       return { order: sqliteOrder, items: sqliteItems };
     }
@@ -1920,6 +1961,8 @@ async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: 
 
   return null;
 }
+
+const trackerOtpAttempts = new Map<string, { fails: number; resetAt: number }>();
 
 // Dispatch Order Out for Delivery & Auto-SMS Driver
 app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -1956,6 +1999,12 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
 
     const targetStatus = 'On the Way';
     const nowIso = new Date().toISOString();
+    const dispatchedAtIso = order.dispatched_at ? new Date(order.dispatched_at).toISOString() : nowIso;
+    const existingPin =
+      order.delivery_pin && /^\d{4}$/.test(String(order.delivery_pin).trim())
+        ? String(order.delivery_pin).trim()
+        : null;
+    const deliveryPin = existingPin || String(crypto.randomInt(1000, 10000));
 
     // Update Neon PostgreSQL when configured
     if (isNeonConfigured) {
@@ -1966,9 +2015,11 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
                delivery_status = $1,
                driver_phone = $2,
                tracking_url = $3,
+               dispatched_at = COALESCE(dispatched_at, $4),
+               delivery_pin = $5,
                updated_at = NOW()
-           WHERE id = $4`,
-          [targetStatus, normalizedPhone, trackingPath, orderId]
+           WHERE id = $6`,
+          [targetStatus, normalizedPhone, trackingPath, new Date(dispatchedAtIso), deliveryPin, orderId]
         );
       } catch (neonErr: any) {
         console.warn('[Dispatch] Neon update warning:', neonErr?.message);
@@ -1983,14 +2034,16 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
              delivery_status = ?,
              driver_phone = ?,
              tracking_url = ?,
+             dispatched_at = COALESCE(dispatched_at, ?),
+             delivery_pin = ?,
              updated_at = ?
          WHERE id = ?`
-      ).run(targetStatus, targetStatus, normalizedPhone, trackingPath, nowIso, orderId);
+      ).run(targetStatus, targetStatus, normalizedPhone, trackingPath, dispatchedAtIso, deliveryPin, nowIso, orderId);
     } catch (sqliteErr: any) {
       console.warn('[Dispatch] SQLite mirror warning:', sqliteErr?.message);
     }
 
-    // Send simulated / webhook SMS to Driver
+    // Send simulated / webhook SMS to Driver (never includes Buyer's Delivery PIN)
     const smsResult = await sendDriverTrackingSMS({
       orderId,
       driverPhone: normalizedPhone,
@@ -2001,13 +2054,18 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
       deliveryAddress: order.delivery_address,
     });
 
-    // Notify Buyer & emit real-time SSE update
+    const isWholesalerBuyer = String(order.buyer_role || '').toLowerCase() === 'wholesaler';
+
+    // Notify Buyer (include private PIN only for Wholesaler) & emit real-time SSE update
     if (order.buyer_id) {
       try {
+        const buyerNotifBody = isWholesalerBuyer
+          ? `${order.seller_name || 'Seller'} আপনার অর্ডারটি ডেলিভারিতে পাঠিয়েছেন। ড্রাইভার: ${normalizedPhone}। ডেলিভারি পিন: ${deliveryPin}।`
+          : `${order.seller_name || 'Seller'} আপনার অর্ডারটি ডেলিভারিতে পাঠিয়েছেন। ড্রাইভার: ${normalizedPhone}।`;
         await createNeonNotification(
           order.buyer_id,
           `পণ্য ডেলিভারিতে পাঠানো হয়েছে / Out for Delivery`,
-          `${order.seller_name || 'Seller'} আপনার অর্ডারটি ডেলিভারিতে পাঠিয়েছেন। ড্রাইভার: ${normalizedPhone}।`,
+          buyerNotifBody,
           'order',
           `/orders`
         );
@@ -2019,7 +2077,9 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
         orderStatus: targetStatus,
         driverPhone: normalizedPhone,
         trackingUrl: trackingPath,
+        dispatchedAt: dispatchedAtIso,
         trackingActive: Boolean(order.tracking_active),
+        ...(isWholesalerBuyer ? { deliveryPin } : {}),
       });
     }
     if (order.seller_id) {
@@ -2028,6 +2088,7 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
         orderStatus: targetStatus,
         driverPhone: normalizedPhone,
         trackingUrl: trackingPath,
+        dispatchedAt: dispatchedAtIso,
         trackingActive: Boolean(order.tracking_active),
       });
     }
@@ -2040,6 +2101,7 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
       driverPhone: normalizedPhone,
       trackingPath,
       trackingUrl: fullTrackingUrl,
+      dispatchedAt: dispatchedAtIso,
       sms: smsResult,
     });
   } catch (err: any) {
@@ -2048,7 +2110,7 @@ app.post('/api/orders/:id/dispatch', requireAuth, async (req: AuthenticatedReque
   }
 });
 
-// Public endpoint: Fetch trip info & live GPS coordinates for /tracker/:orderId and live map viewers
+// Public endpoint: Fetch trip info, digital challan data & live GPS coordinates (NEVER exposes delivery_pin)
 app.get('/api/tracker/:orderId', async (req, res) => {
   try {
     const orderId = req.params.orderId;
@@ -2057,11 +2119,9 @@ app.get('/api/tracker/:orderId', async (req, res) => {
       return res.status(404).json({ error: 'Tracking order not found' });
     }
     const { order, items } = found;
-    const rawStatus = String(order.order_status || order.delivery_status || 'pending').trim();
-    const canonicalStatus =
-      rawStatus.toLowerCase() === 'on the way' || rawStatus.toLowerCase() === 'on_the_way'
-        ? 'On the Way'
-        : rawStatus.toLowerCase();
+    const canonicalStatus = normalizeCanonicalOrderStatus(
+      order.order_status || order.delivery_status || 'pending'
+    );
 
     return res.json({
       orderId: order.id,
@@ -2075,6 +2135,9 @@ app.get('/api/tracker/:orderId', async (req, res) => {
       trackingActive: Boolean(order.tracking_active),
       tripStartedAt: order.trip_started_at || null,
       locationUpdatedAt: order.location_updated_at || null,
+      dispatchedAt: order.dispatched_at || null,
+      deliveredAt: order.delivered_at || null,
+      createdAt: order.created_at || null,
       sellerName: order.seller_name,
       sellerPhone: order.seller_phone || null,
       sellerRole: order.seller_role,
@@ -2089,6 +2152,8 @@ app.get('/api/tracker/:orderId', async (req, res) => {
         banglaName: it.bangla_name,
         quantityKg: Number(it.quantity_kg || 0),
         unit: it.unit || 'kg',
+        unitPrice: it.unit_price !== undefined ? Number(it.unit_price) : 0,
+        subtotal: it.subtotal !== undefined ? Number(it.subtotal) : 0,
       })),
       updatedAt: order.updated_at || null,
     });
@@ -2123,14 +2188,22 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
     }
     const order = found.order;
     const wasTrackingActive = Boolean(order.tracking_active);
-    const currentStatusRaw = String(order.order_status || order.delivery_status || 'On the Way').trim();
-    const nextStatus =
-      currentStatusRaw.toLowerCase() === 'completed' || currentStatusRaw.toLowerCase() === 'rejected'
-        ? currentStatusRaw.toLowerCase()
-        : 'On the Way';
+    const currentStatusLower = String(order.order_status || order.delivery_status || 'On the Way')
+      .trim()
+      .toLowerCase();
+    const isTerminal =
+      currentStatusLower === 'delivered' ||
+      currentStatusLower === 'completed' ||
+      currentStatusLower === 'rejected' ||
+      currentStatusLower === 'cancelled';
+
+    const nextStatus = isTerminal
+      ? normalizeCanonicalOrderStatus(currentStatusLower)
+      : 'On the Way';
+    const effectiveActiveFlag = isTerminal ? false : activeFlag;
 
     const nowIso = new Date().toISOString();
-    const tripStartedAt = order.trip_started_at || (activeFlag ? nowIso : null);
+    const tripStartedAt = order.trip_started_at || (effectiveActiveFlag ? nowIso : null);
 
     // Update Neon PostgreSQL when configured
     if (isNeonConfigured) {
@@ -2146,7 +2219,7 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
                delivery_status = $5,
                updated_at = NOW()
            WHERE id = $6`,
-          [latNum, lngNum, activeFlag, activeFlag ? new Date(nowIso) : null, nextStatus, orderId]
+          [latNum, lngNum, effectiveActiveFlag, effectiveActiveFlag ? new Date(nowIso) : null, nextStatus, orderId]
         );
       } catch (neonErr: any) {
         console.warn('[Tracker Location] Neon update warning:', neonErr?.message);
@@ -2169,8 +2242,8 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
       ).run(
         latNum,
         lngNum,
-        activeFlag ? 1 : 0,
-        activeFlag ? nowIso : null,
+        effectiveActiveFlag ? 1 : 0,
+        effectiveActiveFlag ? nowIso : null,
         nowIso,
         nextStatus,
         nextStatus,
@@ -2185,7 +2258,7 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
       orderId,
       lat: latNum,
       lng: lngNum,
-      trackingActive: activeFlag,
+      trackingActive: effectiveActiveFlag,
       orderStatus: nextStatus,
       tripStartedAt,
       locationUpdatedAt: nowIso,
@@ -2194,7 +2267,7 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
     const recipients = [order.seller_id, order.buyer_id].filter(Boolean) as string[];
     for (const userId of recipients) {
       sendSSE(userId, 'driver_location_updated', ssePayload);
-      if (!wasTrackingActive && activeFlag) {
+      if (!wasTrackingActive && effectiveActiveFlag) {
         sendSSE(userId, 'order_updated', {
           orderId,
           orderStatus: nextStatus,
@@ -2205,7 +2278,7 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
       }
     }
 
-    if (!wasTrackingActive && activeFlag) {
+    if (!wasTrackingActive && effectiveActiveFlag) {
       for (const userId of recipients) {
         try {
           await createNeonNotification(
@@ -2226,7 +2299,7 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
       orderId,
       lat: latNum,
       lng: lngNum,
-      trackingActive: activeFlag,
+      trackingActive: effectiveActiveFlag,
       orderStatus: nextStatus,
       tripStartedAt,
       locationUpdatedAt: nowIso,
@@ -2234,6 +2307,162 @@ app.post('/api/tracker/:orderId/location', async (req, res) => {
   } catch (err: any) {
     console.error('[POST /api/tracker/:orderId/location] error:', err);
     return res.status(500).json({ error: 'Failed to update driver location' });
+  }
+});
+
+// Public endpoint: Driver submits Wholesaler's 4-digit Delivery PIN to complete delivery & stop GPS
+app.post('/api/tracker/:orderId/complete', async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    const nowMs = Date.now();
+    const attemptEntry = trackerOtpAttempts.get(orderId);
+    if (attemptEntry && nowMs < attemptEntry.resetAt && attemptEntry.fails >= 15) {
+      return res.status(429).json({
+        error: 'Too many invalid PIN attempts. Please wait a few minutes and verify the PIN with the wholesaler.',
+      });
+    }
+
+    const normalizedPin = normalizeOtpPinDigits(req.body?.pin ?? req.body?.otp);
+    if (!/^\d{4}$/.test(normalizedPin)) {
+      return res.status(400).json({
+        error: 'Please enter the exact 4-digit Delivery PIN collected from the wholesaler.',
+      });
+    }
+
+    const found = await findOrderWithItemsForTracking(orderId);
+    if (!found) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+    const order = found.order;
+    const statusLower = String(order.order_status || order.delivery_status || 'pending')
+      .trim()
+      .toLowerCase();
+
+    if (statusLower === 'rejected' || statusLower === 'cancelled') {
+      return res.status(400).json({ error: 'Rejected or cancelled orders cannot be marked as delivered.' });
+    }
+    if (statusLower === 'delivered' || statusLower === 'completed') {
+      return res.status(409).json({ error: 'This delivery has already been completed.' });
+    }
+
+    const expectedPin = String(order.delivery_pin || '').trim();
+    if (!/^\d{4}$/.test(expectedPin)) {
+      return res.status(400).json({
+        error: 'No Delivery PIN was issued for this order yet. Ensure the order is dispatched first.',
+      });
+    }
+
+    const pinMatches = crypto.timingSafeEqual(
+      Buffer.from(normalizedPin, 'utf8'),
+      Buffer.from(expectedPin, 'utf8')
+    );
+    if (!pinMatches) {
+      const nextFails = attemptEntry && nowMs < attemptEntry.resetAt ? attemptEntry.fails + 1 : 1;
+      trackerOtpAttempts.set(orderId, {
+        fails: nextFails,
+        resetAt: attemptEntry && nowMs < attemptEntry.resetAt ? attemptEntry.resetAt : nowMs + 5 * 60 * 1000,
+      });
+      return res.status(403).json({
+        error: 'Incorrect Delivery PIN. Please collect the 4-digit PIN from the wholesaler dashboard.',
+      });
+    }
+
+    trackerOtpAttempts.delete(orderId);
+    const nowIso = new Date().toISOString();
+    const targetStatus = 'Delivered';
+
+    let updatedNeon = false;
+    if (isNeonConfigured) {
+      try {
+        await pool.query(
+          `UPDATE orders
+           SET order_status = $1,
+               delivery_status = $1,
+               tracking_active = FALSE,
+               delivered_at = COALESCE(delivered_at, NOW()),
+               updated_at = NOW()
+           WHERE id = $2`,
+          [targetStatus, orderId]
+        );
+        try {
+          await pool.query(
+            `INSERT INTO trade_audit_logs (id, order_id, type, amount, actor_role, actor_name, description, created_at)
+             VALUES ($1, $2, 'ORDER_DELIVERED_OTP', $3, 'driver', $4, $5, NOW())`,
+            [
+              `aud-otp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              orderId,
+              order.total_bdt || 0,
+              order.driver_phone || 'Driver',
+              `Order ${orderId} verified via 4-digit OTP handover and marked Delivered.`,
+            ]
+          );
+        } catch {}
+        updatedNeon = true;
+      } catch (neonErr: any) {
+        console.warn('[Tracker Complete] Neon update warning, falling back to SQLite:', neonErr?.message);
+      }
+    }
+
+    try {
+      db.prepare(
+        `UPDATE orders
+         SET order_status = ?,
+             delivery_status = ?,
+             tracking_active = 0,
+             delivered_at = COALESCE(delivered_at, ?),
+             updated_at = ?
+         WHERE id = ?`
+      ).run(targetStatus, targetStatus, nowIso, nowIso, orderId);
+    } catch (sqliteErr: any) {
+      if (!updatedNeon) {
+        throw sqliteErr;
+      }
+      console.warn('[Tracker Complete] SQLite mirror warning:', sqliteErr?.message);
+    }
+
+    // Notify both Buyer and Seller & emit SSE events to stop GPS viewers cleanly
+    const recipients = [order.seller_id, order.buyer_id].filter(Boolean) as string[];
+    for (const userId of recipients) {
+      try {
+        await createNeonNotification(
+          userId,
+          `ডেলিভারি সম্পন্ন / Order Delivered`,
+          `ড্রাইভার ৪ সংখ্যার ডেলিভারি পিন যাচাই করে #${orderId.slice(-8).toUpperCase()} অর্ডারটি সফলভাবে হস্তান্তর করেছেন।`,
+          'success',
+          `/orders`
+        );
+      } catch {}
+
+      sendSSE(userId, 'driver_location_updated', {
+        orderId,
+        lat: order.driver_lat !== null && order.driver_lat !== undefined ? Number(order.driver_lat) : undefined,
+        lng: order.driver_lng !== null && order.driver_lng !== undefined ? Number(order.driver_lng) : undefined,
+        trackingActive: false,
+        orderStatus: targetStatus,
+        locationUpdatedAt: nowIso,
+      });
+      sendSSE(userId, 'order_updated', {
+        orderId,
+        orderStatus: targetStatus,
+        status: targetStatus,
+        deliveryStatus: targetStatus,
+        trackingActive: false,
+        deliveredAt: nowIso,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Delivery PIN verified! Order marked as Delivered and live GPS tracking stopped.',
+      orderId,
+      orderStatus: targetStatus,
+      deliveryStatus: targetStatus,
+      trackingActive: false,
+      deliveredAt: nowIso,
+    });
+  } catch (err: any) {
+    console.error('[POST /api/tracker/:orderId/complete] error:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to verify Delivery PIN' });
   }
 });
 

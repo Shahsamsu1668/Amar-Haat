@@ -27,9 +27,16 @@ import {
   ArrowRight,
   Navigation,
   Radio,
+  FileText,
+  KeyRound,
 } from 'lucide-react';
 import { DispatchDriverModal } from './DispatchDriverModal';
 import { LiveTrackingModal } from './LiveTrackingModal';
+import {
+  DigitalChallanModal,
+  challanFromOrder,
+  isChallanEligibleStatus,
+} from './DigitalChallanModal';
 
 interface OrdersViewProps {
   currentUser: User | null;
@@ -55,6 +62,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
   const [loading, setLoading] = useState(true);
   const [dispatchOrderTarget, setDispatchOrderTarget] = useState<SupplyChainOrder | null>(null);
   const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
+  const [challanOrderTarget, setChallanOrderTarget] = useState<SupplyChainOrder | null>(null);
 
   const t = (en: string, bn: string) => (language === 'bn' ? bn : en);
   const formatNum = (val: number | string | null | undefined): string => {
@@ -413,6 +421,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
               )
             );
           }}
+        />
+      )}
+
+      {challanOrderTarget && (
+        <DigitalChallanModal
+          challan={challanFromOrder(challanOrderTarget)}
+          language={language}
+          onClose={() => setChallanOrderTarget(null)}
         />
       )}
 
@@ -827,6 +843,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                           ) {
                             return (
                               <div className="flex flex-wrap items-center gap-2">
+                                {isWholesaler && order.deliveryPin && (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 font-bold text-xs shadow-2xs">
+                                    <KeyRound className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                    <span>
+                                      {language === 'bn'
+                                        ? 'ডেলিভারি পিন / Delivery PIN'
+                                        : 'Delivery PIN / ডেলিভারি পিন'}
+                                      :
+                                    </span>
+                                    <span className="font-mono font-black text-sm tracking-widest text-amber-950 bg-white px-2 py-0.5 rounded-lg border border-amber-200">
+                                      {order.deliveryPin}
+                                    </span>
+                                  </span>
+                                )}
                                 {(cStat === 'on the way' || cStat === 'on_the_way') && (
                                   <button
                                     type="button"
@@ -880,6 +910,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                         return null;
                       })()}
                     </div>
+                  )}
+
+                  {isChallanEligibleStatus(currentStatus) && (
+                    <button
+                      type="button"
+                      onClick={() => setChallanOrderTarget(order)}
+                      className="bg-stone-800 hover:bg-stone-900 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 shadow-2xs cursor-pointer transition self-end sm:self-auto"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>{t('View Challan', 'চালান দেখুন')}</span>
+                    </button>
                   )}
                 </div>
               </div>

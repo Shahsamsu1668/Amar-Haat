@@ -224,6 +224,9 @@ export async function initNeonDatabase(): Promise<void> {
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_active BOOLEAN DEFAULT FALSE;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS trip_started_at TIMESTAMPTZ;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_pin TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 
         CREATE TABLE IF NOT EXISTS sms_logs (
           id TEXT PRIMARY KEY,
