@@ -12,6 +12,7 @@ import {
   validateSupplyChainTrade,
   executeOrderTransaction,
   cancelOrderAndRestoreStock,
+  updateSqliteOrderStatus,
 } from './src/server/db.js';
 import { db as jsonDb } from './server/db.js';
 import { generateDistrictMarketPrices, getAllDistrictsMarketPrices, findDistrictInfo } from './src/server/marketData.js';
@@ -21,6 +22,7 @@ import {
   initNeonDatabase,
   syncLegacyUsersToNeon,
   executeNeonOrderTransaction,
+  updateNeonOrderStatus,
 } from './src/server/neonDb.js';
 import {
   hashPassword,
@@ -1746,20 +1748,13 @@ app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
 // Valid states: pending, accepted, rejected, shipped, On the Way, completed
 app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
+    const rawId = req.params.id;
+    const cleanId = String(rawId || '').trim().replace(/^#/, '');
     const { status } = req.body;
     const authUser = req.user!;
 
-    const found = await findOrderWithItemsForTracking(id);
-    if (!found) return res.status(404).json({ error: 'Order not found.' });
-    const order = found.order;
-
-    const isSeller = order.seller_id === authUser.id;
-    const isBuyer = order.buyer_id === authUser.id;
-    const isAdmin = authUser.role === 'admin';
-
-    if (!isSeller && !isBuyer && !isAdmin) {
-      return res.status(403).json({ error: 'Forbidden: You are not authorized to update this order.' });
+    if (!cleanId) {
+      return res.status(400).json({ error: 'Order ID is required.' });
     }
 
     // Normalize lifecycle status
@@ -1772,81 +1767,39 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
     else if (raw === 'completed' || raw === 'delivered' || raw === 'received') targetStatus = 'completed';
     else targetStatus = raw;
 
-    let updatedInNeon = false;
+    let updatedResult: { order: any; items: any[] } | null = null;
+    let updateError: any = null;
+
     if (isNeonConfigured) {
       try {
-        if (targetStatus === 'rejected') {
-          const client = await pool.connect();
-          try {
-            await client.query('BEGIN');
-            const items = (await client.query('SELECT product_id, quantity_kg FROM order_items WHERE order_id = $1', [id])).rows;
-            for (const item of items) {
-              await client.query(
-                'UPDATE products SET available_qty = available_qty + $1, updated_at = NOW() WHERE id = $2',
-                [item.quantity_kg, item.product_id]
-              );
-            }
-            await client.query(
-              "UPDATE orders SET delivery_status = 'rejected', order_status = 'rejected', updated_at = NOW() WHERE id = $1",
-              [id]
-            );
-            await client.query(`
-              INSERT INTO trade_audit_logs (id, order_id, type, amount, actor_role, actor_name, description, created_at)
-              VALUES ($1, $2, 'ORDER_REJECTED', $3, $4, $5, $6, NOW())
-            `, [
-              `aud-rej-${Date.now()}`, id, order.total_bdt, authUser.role, authUser.name,
-              `Order ${id} rejected by ${authUser.name} (${authUser.role}). Stock restored.`
-            ]);
-            await client.query('COMMIT');
-            updatedInNeon = true;
-          } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-          } finally {
-            client.release();
-          }
-        } else {
-          const isTerminalDelivered = targetStatus === 'completed' || targetStatus === 'Delivered';
-          await pool.query(
-            isTerminalDelivered
-              ? 'UPDATE orders SET delivery_status = $1, order_status = $1, tracking_active = FALSE, delivered_at = COALESCE(delivered_at, NOW()), updated_at = NOW() WHERE id = $2'
-              : 'UPDATE orders SET delivery_status = $1, order_status = $1, updated_at = NOW() WHERE id = $2',
-            [targetStatus, id]
-          );
-          updatedInNeon = true;
-        }
+        updatedResult = await updateNeonOrderStatus(cleanId, targetStatus, authUser, pool);
       } catch (neonErr: any) {
-        console.warn('[Orders] Neon status update failed, falling back to SQLite:', neonErr?.message || neonErr);
+        if (neonErr?.statusCode === 403 || neonErr?.message?.includes('Forbidden')) {
+          return res.status(403).json({ error: neonErr.message });
+        }
+        console.warn('[Orders] Neon status update failed, attempting SQLite fallback:', neonErr?.message);
+        updateError = neonErr;
       }
     }
 
-    // Sync status to local SQLite store (authoritative fallback when offline / Neon down)
-    try {
-      const nowIso = new Date().toISOString();
-      if (targetStatus === 'rejected') {
-        const sqliteItems = db
-          .prepare('SELECT product_id, quantity_kg FROM order_items WHERE order_id = ?')
-          .all(id) as any[];
-        for (const item of sqliteItems) {
-          db.prepare(
-            'UPDATE products SET available_qty = COALESCE(available_qty, available_kg, 0) + ?, available_kg = COALESCE(available_kg, available_qty, 0) + ? WHERE id = ?'
-          ).run(item.quantity_kg, item.quantity_kg, item.product_id);
+    if (!updatedResult) {
+      try {
+        updatedResult = updateSqliteOrderStatus(cleanId, targetStatus, authUser);
+      } catch (sqliteErr: any) {
+        if (sqliteErr?.statusCode === 403 || sqliteErr?.message?.includes('Forbidden')) {
+          return res.status(403).json({ error: sqliteErr.message });
         }
-      }
-      const isTerminalDelivered = targetStatus === 'completed' || targetStatus === 'Delivered';
-      if (isTerminalDelivered) {
-        db.prepare(
-          'UPDATE orders SET delivery_status = ?, order_status = ?, tracking_active = 0, delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?'
-        ).run(targetStatus, targetStatus, nowIso, nowIso, id);
-      } else {
-        db.prepare('UPDATE orders SET delivery_status = ?, order_status = ?, updated_at = ? WHERE id = ?')
-          .run(targetStatus, targetStatus, nowIso, id);
-      }
-    } catch (sqliteErr: any) {
-      if (!updatedInNeon) {
-        throw sqliteErr;
+        console.error('[Orders] SQLite status update error:', sqliteErr?.message);
+        if (!updateError) updateError = sqliteErr;
       }
     }
+
+    if (!updatedResult) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+
+    const { order, items } = updatedResult;
+    const canonicalId = order.id;
 
     // ─── Real-Time Notifications for Lifecycle Events Across All Tiers ──────────
     try {
@@ -1858,7 +1811,7 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
           await createNeonNotification(
             order.buyer_id,
             `অর্ডার অনুমোদিত / Order Accepted`,
-            `${sellerLabelBn} ${order.seller_name} আপনার #${id} অর্ডারটি গ্রহণ করেছেন। পণ্য প্রস্তুত করা হচ্ছে।`,
+            `${sellerLabelBn} ${order.seller_name} আপনার #${canonicalId} অর্ডারটি গ্রহণ করেছেন। পণ্য প্রস্তুত করা হচ্ছে।`,
             'order',
             `/orders`
           );
@@ -1868,7 +1821,7 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
           await createNeonNotification(
             order.buyer_id,
             `অর্ডার প্রত্যাখ্যাত / Order Rejected`,
-            `${sellerLabelBn} ${order.seller_name} আপনার #${id} অর্ডারটি গ্রহণ করেননি (প্রত্যাখ্যাত)। স্টক মুক্ত করা হয়েছে।`,
+            `${sellerLabelBn} ${order.seller_name} আপনার #${canonicalId} অর্ডারটি গ্রহণ করেননি (প্রত্যাখ্যাত)। স্টক মুক্ত করা হয়েছে।`,
             'warning',
             `/orders`
           );
@@ -1878,7 +1831,7 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
           await createNeonNotification(
             order.buyer_id,
             `ডেলিভারি পাঠানো হয়েছে / Order Shipped`,
-            `${sellerLabelBn} ${order.seller_name} #${id} অর্ডারের পণ্য ডেলিভারির জন্য পাঠিয়েছেন। পৌঁছালে 'ডেলিভারি গ্রহণ করেছি' ক্লিক করুন।`,
+            `${sellerLabelBn} ${order.seller_name} #${canonicalId} অর্ডারের পণ্য ডেলিভারির জন্য পাঠিয়েছেন। পৌঁছালে 'ডেলিভারি গ্রহণ করেছি' ক্লিক করুন।`,
             'order',
             `/orders`
           );
@@ -1888,7 +1841,7 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
           await createNeonNotification(
             order.seller_id,
             `ডেলিভারি সম্পন্ন / Order Received & Completed`,
-            `${buyerLabelBn} ${order.buyer_name} #${id} অর্ডারের পণ্য গ্রহণ করেছেন। লেনদেন সফলভাবে সম্পন্ন হয়েছে।`,
+            `${buyerLabelBn} ${order.buyer_name} #${canonicalId} অর্ডারের পণ্য গ্রহণ করেছেন। লেনদেন সফলভাবে সম্পন্ন হয়েছে।`,
             'success',
             `/orders`
           );
@@ -1899,28 +1852,33 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
     }
 
     // Real-time dispatch via SSE to both Buyer and Seller
-    sendSSE(order.buyer_id, 'order_updated', {
-      orderId: id,
-      orderStatus: targetStatus,
-      status: targetStatus,
-      deliveryStatus: targetStatus,
-      updatedBy: authUser.name,
-      updatedRole: authUser.role,
-    });
-    sendSSE(order.seller_id, 'order_updated', {
-      orderId: id,
-      orderStatus: targetStatus,
-      status: targetStatus,
-      deliveryStatus: targetStatus,
-      updatedBy: authUser.name,
-      updatedRole: authUser.role,
-    });
+    if (order.buyer_id) {
+      sendSSE(order.buyer_id, 'order_updated', {
+        orderId: canonicalId,
+        orderStatus: targetStatus,
+        status: targetStatus,
+        deliveryStatus: targetStatus,
+        updatedBy: authUser.name,
+        updatedRole: authUser.role,
+      });
+    }
+    if (order.seller_id) {
+      sendSSE(order.seller_id, 'order_updated', {
+        orderId: canonicalId,
+        orderStatus: targetStatus,
+        status: targetStatus,
+        deliveryStatus: targetStatus,
+        updatedBy: authUser.name,
+        updatedRole: authUser.role,
+      });
+    }
 
     return res.json({
       success: true,
       message: `Order status successfully updated to ${targetStatus}.`,
-      orderId: id,
+      orderId: canonicalId,
       orderStatus: targetStatus,
+      order: formatOrderOutput(order, items),
     });
   } catch (err: any) {
     console.error('[Orders] Error in PUT /api/orders/:id/status:', err);
@@ -1932,15 +1890,33 @@ app.put('/api/orders/:id/status', requireAuth, async (req: AuthenticatedRequest,
 
 // Helper to look up order + items across Neon (primary) and SQLite (fallback)
 async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: any; items: any[] } | null> {
+  const cleanId = String(orderId || '').trim().replace(/^#/, '');
+  if (!cleanId) return null;
+
   if (isNeonConfigured) {
     try {
-      const orderRes = await pool.query('SELECT * FROM orders WHERE id = $1 LIMIT 1', [orderId]);
+      const orderRes = await pool.query(
+        `SELECT * FROM orders 
+         WHERE id = $1 
+            OR LOWER(id) = LOWER($1) 
+            OR tracking_code = $1 
+            OR LOWER(tracking_code) = LOWER($1) 
+         LIMIT 1`,
+        [cleanId]
+      );
       if (orderRes.rows.length > 0) {
-        const itemsRes = await pool.query(
-          'SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = $1',
-          [orderId]
-        );
-        return { order: orderRes.rows[0], items: itemsRes.rows };
+        const canonicalId = orderRes.rows[0].id;
+        let items: any[] = [];
+        try {
+          const itemsRes = await pool.query(
+            'SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = $1',
+            [canonicalId]
+          );
+          items = itemsRes.rows;
+        } catch (itemErr: any) {
+          console.warn('[Tracker] Neon order_items query notice:', itemErr?.message);
+        }
+        return { order: orderRes.rows[0], items };
       }
     } catch (err: any) {
       console.warn('[Tracker] Neon order lookup fallback to SQLite:', err?.message);
@@ -1948,11 +1924,25 @@ async function findOrderWithItemsForTracking(orderId: string): Promise<{ order: 
   }
 
   try {
-    const sqliteOrder = db.prepare('SELECT * FROM orders WHERE id = ? LIMIT 1').get(orderId) as any;
+    const sqliteOrder = db.prepare(`
+      SELECT * FROM orders 
+      WHERE id = ? 
+         OR LOWER(id) = LOWER(?) 
+         OR tracking_code = ? 
+         OR LOWER(tracking_code) = LOWER(?) 
+      LIMIT 1
+    `).get(cleanId, cleanId, cleanId, cleanId) as any;
+
     if (sqliteOrder) {
-      const sqliteItems = db
-        .prepare('SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = ?')
-        .all(orderId) as any[];
+      const canonicalId = sqliteOrder.id;
+      let sqliteItems: any[] = [];
+      try {
+        sqliteItems = db
+          .prepare('SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = ?')
+          .all(canonicalId) as any[];
+      } catch (itemErr: any) {
+        console.warn('[Tracker] SQLite order_items query notice:', itemErr?.message);
+      }
       return { order: sqliteOrder, items: sqliteItems };
     }
   } catch (err: any) {

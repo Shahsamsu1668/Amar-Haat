@@ -564,9 +564,14 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
     orderId: string,
     status: OrderLifecycleStatus | string
   ) => {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
+    if (!cleanId) {
+      showToast(t('Invalid order ID', 'অর্ডার আইডি পাওয়া যায়নি'), 'error');
+      return;
+    }
     try {
-      await orderApi.updateStatus(orderId, status, currentUser?.name || 'Farmer', 'farmer');
-      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId, status } }));
+      await orderApi.updateStatus(cleanId, status, currentUser?.name || 'Farmer', 'farmer');
+      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId: cleanId, status } }));
       await loadReceivedOrders();
       const statusLabel = status === 'accepted' ? (language === 'bn' ? 'গৃহীত (Accepted)' : 'Accepted')
         : status === 'rejected' ? (language === 'bn' ? 'প্রত্যাখ্যাত (Rejected)' : 'Rejected')
@@ -968,14 +973,20 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                       {currentStatus === 'pending' && (
                         <>
                           <button
-                            onClick={() => handleUpdateOrderStatus(order.id, 'accepted')}
+                            onClick={() => {
+                              const targetId = order.id || (order as any).orderId || (order as any).order_id;
+                              handleUpdateOrderStatus(targetId, 'accepted');
+                            }}
                             className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 shadow-xs cursor-pointer"
                           >
                             <CheckCircle2 className="w-3.5 h-3.5" />
                             <span>{t('Accept', 'এক্সেপ্ট')}</span>
                           </button>
                           <button
-                            onClick={() => handleUpdateOrderStatus(order.id, 'rejected')}
+                            onClick={() => {
+                              const targetId = order.id || (order as any).orderId || (order as any).order_id;
+                              handleUpdateOrderStatus(targetId, 'rejected');
+                            }}
                             className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 shadow-xs cursor-pointer"
                           >
                             <XCircle className="w-3.5 h-3.5" />

@@ -226,15 +226,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
     orderId: string,
     status: OrderLifecycleStatus | string
   ) => {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
+    if (!cleanId) {
+      showToast(t('Invalid order ID', 'অর্ডার আইডি পাওয়া যায়নি'));
+      return;
+    }
     try {
-      await orderApi.updateStatus(orderId, status, currentUser?.name || 'Authorized User', currentUser?.role || 'admin');
+      await orderApi.updateStatus(cleanId, status, currentUser?.name || 'Authorized User', currentUser?.role || 'admin');
       showToast(
         t(
-          `Order ${orderId} status updated to ${status}.`,
-          `অর্ডার ${language === 'bn' ? toBanglaNumber(orderId) : orderId} স্ট্যাটাস ${status} এ পরিবর্তিত হয়েছে।`
+          `Order ${cleanId} status updated to ${status}.`,
+          `অর্ডার ${language === 'bn' ? toBanglaNumber(cleanId) : cleanId} স্ট্যাটাস ${status} এ পরিবর্তিত হয়েছে।`
         )
       );
-      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId, status } }));
+      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId: cleanId, status } }));
       loadOrders();
     } catch (e: any) {
       showToast(e.message || t('Status update failed', 'স্ট্যাটাস আপডেট ব্যর্থ হয়েছে'));
@@ -734,14 +739,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                             return (
                               <div className="flex items-center gap-1.5">
                                 <button
-                                  onClick={() => handleUpdateStatus(order.id, 'accepted')}
+                                  onClick={() => {
+                                    const targetId = order.id || (order as any).orderId || (order as any).order_id;
+                                    handleUpdateStatus(targetId, 'accepted');
+                                  }}
                                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
                                 >
                                   <CheckCircle2 className="w-3.5 h-3.5" />
                                   <span>{t('Accept', 'এক্সেপ্ট')}</span>
                                 </button>
                                 <button
-                                  onClick={() => handleUpdateStatus(order.id, 'rejected')}
+                                  onClick={() => {
+                                    const targetId = order.id || (order as any).orderId || (order as any).order_id;
+                                    handleUpdateStatus(targetId, 'rejected');
+                                  }}
                                   className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
                                 >
                                   <XCircle className="w-3.5 h-3.5" />
@@ -881,7 +892,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({ currentUser, language })
                                   </button>
                                 )}
                                 <button
-                                  onClick={() => handleUpdateStatus(order.id, 'completed')}
+                                  onClick={() => {
+                                    const targetId = order.id || (order as any).orderId || (order as any).order_id;
+                                    handleUpdateStatus(targetId, 'completed');
+                                  }}
                                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
                                 >
                                   <CheckCircle2 className="w-3.5 h-3.5" />

@@ -227,6 +227,22 @@ export async function initNeonDatabase(): Promise<void> {
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_pin TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+        CREATE INDEX IF NOT EXISTS idx_orders_tracking_code ON orders(tracking_code);
+
+        CREATE TABLE IF NOT EXISTS order_items (
+          id TEXT PRIMARY KEY,
+          order_id TEXT NOT NULL,
+          product_id TEXT,
+          crop_name TEXT NOT NULL,
+          bangla_name TEXT,
+          quantity_kg NUMERIC NOT NULL,
+          unit_price NUMERIC NOT NULL,
+          subtotal NUMERIC NOT NULL,
+          unit TEXT DEFAULT 'kg',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+        ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit TEXT DEFAULT 'kg';
 
         CREATE TABLE IF NOT EXISTS sms_logs (
           id TEXT PRIMARY KEY,
@@ -776,4 +792,132 @@ export async function executeNeonOrderTransaction(params: NeonOrderParams, clien
   } finally {
     client.release();
   }
+}
+
+export async function updateNeonOrderStatus(
+  orderIdentifier: string,
+  targetStatus: string,
+  authUser: { id: string; role: string; name?: string; phone?: string },
+  clientPool: pg.Pool = pool
+): Promise<{ order: any; items: any[] } | null> {
+  const cleanId = String(orderIdentifier || '').trim().replace(/^#/, '');
+  if (!cleanId) return null;
+
+  // 1. Look up order by primary ID, case-insensitive ID, or tracking code
+  const orderRes = await clientPool.query(
+    `SELECT * FROM orders 
+     WHERE id = $1 
+        OR LOWER(id) = LOWER($1) 
+        OR tracking_code = $1 
+        OR LOWER(tracking_code) = LOWER($1) 
+     LIMIT 1`,
+    [cleanId]
+  );
+
+  if (orderRes.rows.length === 0) {
+    return null;
+  }
+
+  const order = orderRes.rows[0];
+  const canonicalOrderId = order.id;
+
+  // 2. Resilient authorization check
+  const isSeller = Boolean(
+    (order.seller_id && order.seller_id === authUser.id) ||
+    (order.seller_phone && authUser.phone && order.seller_phone === authUser.phone)
+  );
+  const isBuyer = Boolean(
+    (order.buyer_id && order.buyer_id === authUser.id) ||
+    (order.buyer_phone && authUser.phone && order.buyer_phone === authUser.phone)
+  );
+  const isAdmin = authUser.role === 'admin';
+
+  if (!isSeller && !isBuyer && !isAdmin) {
+    const authErr: any = new Error('Forbidden: You are not authorized to update this order.');
+    authErr.statusCode = 403;
+    throw authErr;
+  }
+
+  // 3. Execute update in Neon
+  const client = await clientPool.connect();
+  let updatedOrder: any = null;
+  try {
+    await client.query('BEGIN');
+
+    if (targetStatus === 'rejected') {
+      try {
+        const itemRows = (await client.query(
+          'SELECT product_id, quantity_kg FROM order_items WHERE order_id = $1',
+          [canonicalOrderId]
+        )).rows;
+
+        for (const item of itemRows) {
+          if (item.product_id && item.quantity_kg) {
+            await client.query(
+              'UPDATE products SET available_qty = available_qty + $1, updated_at = NOW() WHERE id = $2',
+              [item.quantity_kg, item.product_id]
+            );
+          }
+        }
+      } catch (itemErr: any) {
+        console.warn('[Neon] Rejection stock restore notice:', itemErr?.message);
+      }
+
+      const updateRes = await client.query(`
+        UPDATE orders 
+        SET delivery_status = 'rejected', 
+            order_status = 'rejected', 
+            tracking_active = FALSE,
+            updated_at = NOW() 
+        WHERE id = $1
+        RETURNING *
+      `, [canonicalOrderId]);
+      updatedOrder = updateRes.rows[0];
+
+      try {
+        await client.query(`
+          INSERT INTO trade_audit_logs (id, order_id, type, amount, actor_role, actor_name, description, created_at)
+          VALUES ($1, $2, 'ORDER_REJECTED', $3, $4, $5, $6, NOW())
+        `, [
+          `aud-rej-${Date.now()}`, canonicalOrderId, order.total_bdt, authUser.role, authUser.name || 'User',
+          `Order ${canonicalOrderId} rejected by ${authUser.name || 'User'} (${authUser.role}). Stock restored.`
+        ]);
+      } catch (auditErr: any) {
+        console.warn('[Neon] Audit log insertion skipped on rejection:', auditErr?.message);
+      }
+    } else {
+      const updateRes = await client.query(`
+        UPDATE orders 
+        SET delivery_status = $1, 
+            order_status = $1, 
+            tracking_active = CASE WHEN $1 IN ('completed', 'Delivered') THEN FALSE ELSE tracking_active END,
+            delivered_at = CASE WHEN $1 IN ('completed', 'Delivered') THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+            updated_at = NOW() 
+        WHERE id = $2
+        RETURNING *
+      `, [targetStatus, canonicalOrderId]);
+      updatedOrder = updateRes.rows[0];
+    }
+
+    await client.query('COMMIT');
+  } catch (txErr) {
+    await client.query('ROLLBACK');
+    throw txErr;
+  } finally {
+    client.release();
+  }
+
+  // 4. Safely fetch line items
+  let items: any[] = [];
+  try {
+    const itemsRes = await clientPool.query(
+      'SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = $1',
+      [canonicalOrderId]
+    );
+    items = itemsRes.rows;
+  } catch (err: any) {
+    console.warn('[Neon] Notice retrieving line items for order:', canonicalOrderId, err?.message);
+  }
+
+  return { order: updatedOrder || order, items };
 }

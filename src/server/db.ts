@@ -1294,6 +1294,94 @@ export function cancelOrderAndRestoreStock(orderId: string, actorName = 'User', 
   return cancelTx();
 }
 
+export function updateSqliteOrderStatus(
+  orderIdentifier: string,
+  targetStatus: string,
+  authUser: { id: string; role: string; name?: string; phone?: string }
+): { order: any; items: any[] } | null {
+  const cleanId = String(orderIdentifier || '').trim().replace(/^#/, '');
+  if (!cleanId) return null;
+
+  const order = db.prepare(`
+    SELECT * FROM orders 
+    WHERE id = ? 
+       OR LOWER(id) = LOWER(?) 
+       OR tracking_code = ? 
+       OR LOWER(tracking_code) = LOWER(?) 
+    LIMIT 1
+  `).get(cleanId, cleanId, cleanId, cleanId) as any;
+
+  if (!order) return null;
+  const canonicalOrderId = order.id;
+
+  // Authorization check
+  const isSeller = Boolean(
+    (order.seller_id && order.seller_id === authUser.id) ||
+    (order.seller_phone && authUser.phone && order.seller_phone === authUser.phone)
+  );
+  const isBuyer = Boolean(
+    (order.buyer_id && order.buyer_id === authUser.id) ||
+    (order.buyer_phone && authUser.phone && order.buyer_phone === authUser.phone)
+  );
+  const isAdmin = authUser.role === 'admin';
+
+  if (!isSeller && !isBuyer && !isAdmin) {
+    const authErr: any = new Error('Forbidden: You are not authorized to update this order.');
+    authErr.statusCode = 403;
+    throw authErr;
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (targetStatus === 'rejected') {
+    try {
+      const sqliteItems = db
+        .prepare('SELECT product_id, quantity_kg FROM order_items WHERE order_id = ?')
+        .all(canonicalOrderId) as any[];
+      for (const item of sqliteItems) {
+        db.prepare(
+          'UPDATE products SET available_qty = COALESCE(available_qty, available_kg, 0) + ?, available_kg = COALESCE(available_kg, available_qty, 0) + ? WHERE id = ?'
+        ).run(item.quantity_kg, item.quantity_kg, item.product_id);
+      }
+    } catch (itemErr: any) {
+      console.warn('[SQLite] Rejection stock restore notice:', itemErr?.message);
+    }
+
+    db.prepare(`
+      UPDATE orders 
+      SET delivery_status = 'rejected', order_status = 'rejected', tracking_active = 0, updated_at = ? 
+      WHERE id = ?
+    `).run(nowIso, canonicalOrderId);
+  } else {
+    const isTerminalDelivered = targetStatus === 'completed' || targetStatus === 'Delivered';
+    if (isTerminalDelivered) {
+      db.prepare(`
+        UPDATE orders 
+        SET delivery_status = ?, order_status = ?, tracking_active = 0, delivered_at = COALESCE(delivered_at, ?), updated_at = ? 
+        WHERE id = ?
+      `).run(targetStatus, targetStatus, nowIso, nowIso, canonicalOrderId);
+    } else {
+      db.prepare(`
+        UPDATE orders 
+        SET delivery_status = ?, order_status = ?, updated_at = ? 
+        WHERE id = ?
+      `).run(targetStatus, targetStatus, nowIso, canonicalOrderId);
+    }
+  }
+
+  const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ? LIMIT 1').get(canonicalOrderId) as any;
+  let items: any[] = [];
+  try {
+    items = db
+      .prepare('SELECT crop_name, bangla_name, quantity_kg, unit_price, subtotal, unit FROM order_items WHERE order_id = ?')
+      .all(canonicalOrderId) as any[];
+  } catch (itemErr: any) {
+    console.warn('[SQLite] Could not retrieve order items for updated order:', canonicalOrderId, itemErr?.message);
+  }
+
+  return { order: updatedOrder || order, items };
+}
+
 // Initialize on import
 initDatabase();
 

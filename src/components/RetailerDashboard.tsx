@@ -576,16 +576,17 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
     orderId: string,
     status: OrderLifecycleStatus | string
   ) => {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
     try {
-      await orderApi.updateStatus(orderId, status, currentUser?.name || 'Retailer', 'retailer');
+      await orderApi.updateStatus(cleanId, status, currentUser?.name || 'Retailer', 'retailer');
       showToast(
         t(
-          `Order ${orderId} status updated to ${status}.`,
-          `অর্ডার ${language === 'bn' ? toBanglaNumber(orderId) : orderId} স্ট্যাটাস ${status} এ হালনাগাদ করা হয়েছে।`
+          `Order ${cleanId} status updated to ${status}.`,
+          `অর্ডার ${language === 'bn' ? toBanglaNumber(cleanId) : cleanId} স্ট্যাটাস ${status} এ হালনাগাদ করা হয়েছে।`
         ),
         'success'
       );
-      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId, status } }));
+      window.dispatchEvent(new CustomEvent('nb_order_updated', { detail: { orderId: cleanId, status } }));
       loadConsumerOrders();
     } catch (e: any) {
       showToast(e.message || t('Failed to update order status', 'অর্ডার স্ট্যাটাস আপডেট ব্যর্থ হয়েছে'), 'error');

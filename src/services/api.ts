@@ -214,11 +214,21 @@ export const orderApi = {
     status: OrderLifecycleStatus | string,
     actorName = 'User',
     actorRole = 'seller'
-  ): Promise<{ success: boolean; message: string; orderId?: string; orderStatus?: string }> {
-    return fetchJson(`/api/orders/${orderId}/status`, {
+  ): Promise<{ success: boolean; message: string; orderId?: string; orderStatus?: string; order?: any }> {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
+    return fetchJson(`/api/orders/${cleanId}/status`, {
       method: 'PUT',
       body: JSON.stringify({ status, actorName, actorRole }),
     });
+  },
+
+  updateOrderStatus(
+    orderId: string,
+    status: OrderLifecycleStatus | string,
+    actorName = 'User',
+    actorRole = 'seller'
+  ) {
+    return this.updateStatus(orderId, status, actorName, actorRole);
   },
 
   async dispatchOrder(

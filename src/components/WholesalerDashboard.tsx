@@ -459,8 +459,9 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
     orderId: string,
     status: 'Confirmed' | 'Processing' | 'Dispatched' | 'Delivered' | string
   ) => {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
     try {
-      await orderApi.updateStatus(orderId, status, currentUser?.name || 'Wholesaler', 'wholesaler');
+      await orderApi.updateStatus(cleanId, status, currentUser?.name || 'Wholesaler', 'wholesaler');
       showToast(t(`Order status updated to ${status}!`, `অর্ডার স্ট্যাটাস ${status}-এ পরিবর্তিত হয়েছে!`), 'success');
       loadRetailerOrders();
     } catch (e: any) {
@@ -473,8 +474,9 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
     orderId: string,
     status: OrderLifecycleStatus | string
   ) => {
+    const cleanId = String(orderId || '').trim().replace(/^#/, '');
     try {
-      await orderApi.updateStatus(orderId, status, currentUser?.businessName || currentUser?.name || 'Wholesaler', 'wholesaler');
+      await orderApi.updateStatus(cleanId, status, currentUser?.businessName || currentUser?.name || 'Wholesaler', 'wholesaler');
       showToast(
         status === 'completed'
           ? t('Delivery confirmed and marked as received!', 'ডেলিভারি গ্রহণ সফলভাবে সম্পন্ন হয়েছে!')

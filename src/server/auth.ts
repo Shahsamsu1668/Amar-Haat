@@ -158,8 +158,8 @@ export async function createSession(
   const tokenHash = hashSessionToken(rawToken);
   const sessionId = `sess_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
   const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-  const ipAddress = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-  const userAgent = req.headers['user-agent'] || 'Unknown Client';
+  const ipAddress = (req?.headers?.['x-forwarded-for'] as string) || req?.socket?.remoteAddress || '127.0.0.1';
+  const userAgent = req?.headers?.['user-agent'] || 'Unknown Client';
 
   let savedToNeon = false;
   if (isNeonConfigured) {

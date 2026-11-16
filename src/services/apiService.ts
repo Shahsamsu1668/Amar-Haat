@@ -267,9 +267,11 @@ export const apiService = {
 
   async updateOrderStatus(id: string, status: CustomerOrder['status'], deliveredDate?: string): Promise<ApiResponse<CustomerOrder>> {
     try {
-      const res = await fetch(`${BASE_URL}/orders/${id}/status`, {
+      const cleanId = String(id || '').trim().replace(/^#/, '');
+      const res = await fetch(`${BASE_URL}/orders/${cleanId}/status`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: this.getAuthHeaders(),
         body: JSON.stringify({ status, deliveredDate }),
       });
       const data = await res.json();
