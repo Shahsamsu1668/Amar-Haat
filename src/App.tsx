@@ -506,7 +506,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-100/70 text-stone-900 flex flex-col font-sans transition-colors">
+    <div className="min-h-screen overflow-x-hidden bg-stone-100/70 text-stone-900 flex flex-col font-sans transition-colors">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 bg-stone-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold border border-stone-700 animate-fade-in">

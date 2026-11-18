@@ -694,6 +694,21 @@ function generateDistrictRates(district: string, fluctuationMap: Record<string, 
   });
 }
 
+function formatDamTimestamp(iso: string | null, language: string): string {
+  if (!iso) return language === 'bn' ? 'তথ্য নেই' : 'N/A';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return language === 'bn' ? 'তথ্য নেই' : 'N/A';
+  return d.toLocaleString(language === 'bn' ? 'bn-BD' : 'en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Dhaka',
+  });
+}
+
 export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
   rates: propRates,
   language,
@@ -709,6 +724,7 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
   const [refreshNotification, setRefreshNotification] = useState<string | null>(null);
   const [apiRates, setApiRates] = useState<MarketRate[]>([]);
   const [loadingDam, setLoadingDam] = useState<boolean>(false);
+  const [damLastUpdated, setDamLastUpdated] = useState<string | null>(null);
 
   // Active district
   const activeDistrict = onDistrictChange ? selectedDistrict : districtFilter;
@@ -720,6 +736,7 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
       const res = await intelligenceApi.getMarketPrices(targetDistrict);
       if (res && Array.isArray(res.rates) && res.rates.length > 0) {
         setApiRates(res.rates);
+        setDamLastUpdated(res.lastUpdated || (res.rates[0] as any)?.lastUpdated || null);
       }
     } catch (err) {
       console.warn('[DAM Market Rates] API fetch warning, using official telemetry benchmark:', err);
@@ -1147,8 +1164,8 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
                   <th className="py-3.5 px-4">{t('Crop / Commodity', 'পণ্য / ফসল')}</th>
                   <th className="py-3.5 px-3">{t('Category', 'ক্যাটাগরি')}</th>
                   <th className="py-3.5 px-3">{t('Unit', 'পরিমাপ একক')}</th>
-                  <th className="py-3.5 px-4">{t('Local Wholesale (মোকাম)', 'স্থানীয় পাইকারি (মোকাম)')}</th>
-                  <th className="py-3.5 px-4">{t('Dhaka Wholesale (কারওয়ান বাজার)', 'ঢাকা পাইকারি (কারওয়ান বাজার)')}</th>
+                  <th className="py-3.5 px-4">{t('Wholesale Price – Local (মোকাম)', 'পাইকারি মূল্য – স্থানীয় (মোকাম)')}</th>
+                  <th className="py-3.5 px-4">{t('Wholesale Price – Dhaka (Karwan Bazar)', 'পাইকারি মূল্য – ঢাকা (কারওয়ান বাজার)')}</th>
                   <th className="py-3.5 px-4">{t('Local Retail (খুচরা)', 'স্থানীয় খুচরা বাজার')}</th>
                   <th className="py-3.5 px-4 text-right">{t('24h Trend', '২৪ ঘণ্টার গতি')}</th>
                   <th className="py-3.5 px-3 text-center">{t('Source', 'উৎস')}</th>
@@ -1368,7 +1385,7 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
                     <div className="bg-emerald-50/90 border border-emerald-200/90 rounded-2xl p-3 flex flex-col justify-between">
                       <div className="text-[11px] font-extrabold text-emerald-800 flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-                        <span>{t('Local Wholesale', 'স্থানীয় পাইকারি দর')}</span>
+                        <span>{t('Wholesale Price – Local', 'পাইকারি মূল্য – স্থানীয়')}</span>
                       </div>
                       <div className="mt-1.5">
                         <span className="text-base sm:text-lg font-black text-emerald-950 font-mono">
@@ -1387,7 +1404,7 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
                     <div className="bg-blue-50/90 border border-blue-200/90 rounded-2xl p-3 flex flex-col justify-between">
                       <div className="text-[11px] font-extrabold text-blue-800 flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" />
-                        <span>{t('Dhaka Terminal', 'ঢাকার পাইকারি দর')}</span>
+                        <span>{t('Wholesale Price – Dhaka', 'পাইকারি মূল্য – ঢাকা')}</span>
                       </div>
                       <div className="mt-1.5">
                         <span className="text-base sm:text-lg font-black text-blue-950 font-mono">
@@ -1431,6 +1448,21 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
           })}
         </div>
       )}
+
+      {/* ─── Trust & Transparency: Source badge + Last Updated ─── */}
+      <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 text-xs text-emerald-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-bold flex-wrap">
+          <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{t('Source: Department of Agricultural Marketing (Govt. rate)', 'তথ্যসূত্র: কৃষি বিপণন অধিদপ্তর (সরকারি দর)')}</span>
+          <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white text-[10px]">
+            {t('Wholesale Price', 'পাইকারি মূল্য')}
+          </span>
+        </div>
+        <span className="font-semibold text-emerald-800" data-testid="dam-last-updated">
+          {t('Last Updated: ', 'সর্বশেষ আপডেট: ')}
+          {formatDamTimestamp(damLastUpdated, language)}
+        </span>
+      </div>
 
       {/* ─── Footer Notice & Attribution ─── */}
       <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 text-xs text-stone-500 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">

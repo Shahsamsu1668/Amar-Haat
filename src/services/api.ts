@@ -318,7 +318,7 @@ export const intelligenceApi = {
     });
   },
 
-  async getMarketPrices(district?: string): Promise<{ rates: MarketRate[]; source: string }> {
+  async getMarketPrices(district?: string): Promise<{ rates: MarketRate[]; source: string; lastUpdated?: string | null }> {
     const qs = district && district !== 'All' ? `?district=${encodeURIComponent(district)}` : '';
     return fetchJson(`/api/market-prices${qs}`);
   },

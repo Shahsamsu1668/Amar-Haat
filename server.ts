@@ -38,6 +38,7 @@ import {
   SESSION_COOKIE_OPTIONS,
   type AuthenticatedRequest,
 } from './src/server/auth.js';
+import { buildDamSync } from './src/server/damScraper.js';
 import {
   sendDriverTrackingSMS,
   normalizePhoneNumber,
@@ -2826,14 +2827,144 @@ app.get(['/api/market-prices', '/api/market-rates'], async (req, res) => {
       })();
     }
 
+    let latestUpdate: string | null = null;
+    for (const r of rates) {
+      const ts = r.lastUpdated ? new Date(r.lastUpdated).getTime() : NaN;
+      if (!isNaN(ts) && (!latestUpdate || ts > new Date(latestUpdate).getTime())) {
+        latestUpdate = new Date(ts).toISOString();
+      }
+    }
+
     return res.json({
       success: true,
       rates,
       total: rates.length,
+      lastUpdated: latestUpdate,
       source: 'Department of Agricultural Marketing (DAM)',
       disclaimer: 'সতর্কবার্তা: এখানে প্রদর্শিত দামগুলো গড় মূল্য। ফসলের মান ও স্থানীয় হাটের ওপর ভিত্তি করে প্রকৃত দামে সামান্য তারতম্য হতে পারে।'
     });
   } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DAM PRICE SYNC (on-demand; trigger manually or via external cron ping) ─────
+// Avoids node-cron: Render free tier sleeps and kills in-process schedulers.
+// Auth: admin session OR header `x-cron-secret` / query `key` matching MARKET_SYNC_SECRET.
+let lastMarketSyncAt = 0;
+let marketSyncInFlight = false;
+const MARKET_SYNC_COOLDOWN_MS = 60 * 1000;
+
+app.post('/api/market/sync-prices', optionalAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const secret = process.env.MARKET_SYNC_SECRET;
+    const provided = String(req.headers['x-cron-secret'] || req.query.key || '');
+    const secretOk = !!secret && provided.length > 0 && provided === secret;
+    const adminOk = req.user?.role === 'admin';
+    const devOpen = process.env.NODE_ENV !== 'production' && !secret;
+
+    if (!secretOk && !adminOk && !devOpen) {
+      return res.status(401).json({ error: 'Unauthorized: admin session or valid cron secret required.' });
+    }
+
+    const now = Date.now();
+    if (marketSyncInFlight) {
+      return res.status(429).json({ error: 'A price sync is already running.' });
+    }
+    if (now - lastMarketSyncAt < MARKET_SYNC_COOLDOWN_MS) {
+      return res.status(429).json({
+        error: 'Price sync was triggered recently. Please wait a minute.',
+        retryAfterSeconds: Math.ceil((MARKET_SYNC_COOLDOWN_MS - (now - lastMarketSyncAt)) / 1000),
+      });
+    }
+    marketSyncInFlight = true;
+
+    try {
+      const result = await buildDamSync();
+      const rows = result.rows;
+
+      // 1. SQLite (local fallback store)
+      let sqliteCount = 0;
+      try {
+        const upsert = db.prepare(`
+          INSERT OR REPLACE INTO market_prices (
+            id, district, upazila, market_name, market_name_bn, crop_name, bangla_name,
+            category, wholesale_price, wholesale_dhaka, retail_price, min_wholesale, max_wholesale,
+            min_retail, max_retail, unit, change_24h, trend, source, last_updated
+          ) VALUES (
+            @id, @district, @upazila, @market_name, @market_name_bn, @crop_name, @bangla_name,
+            @category, @wholesale_price, @wholesale_dhaka, @retail_price, @min_wholesale, @max_wholesale,
+            @min_retail, @max_retail, @unit, @change_24h, @trend, @source, @last_updated
+          )
+        `);
+        db.transaction((batch: any[]) => {
+          for (const r of batch) upsert.run(r);
+        })(rows);
+        sqliteCount = rows.length;
+      } catch (e: any) {
+        console.warn('[DAM Sync] SQLite upsert warning:', e.message);
+      }
+
+      // 2. Neon PostgreSQL — chunked bulk upsert (few round trips for the free tier)
+      let neonCount = 0;
+      if (isNeonConfigured) {
+        try {
+          const CHUNK = 500;
+          for (let i = 0; i < rows.length; i += CHUNK) {
+            const c = rows.slice(i, i + CHUNK);
+            const col = (k: string) => c.map((r: any) => r[k]);
+            await pool.query(
+              `INSERT INTO market_prices (
+                 id, district, upazila, market_name, market_name_bn, crop_name, bangla_name,
+                 category, wholesale_price, wholesale_dhaka, retail_price, min_wholesale, max_wholesale,
+                 min_retail, max_retail, unit, change_24h, trend, source, last_updated
+               )
+               SELECT * FROM unnest(
+                 $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[],
+                 $8::text[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[],
+                 $14::numeric[], $15::numeric[], $16::text[], $17::numeric[], $18::text[], $19::text[], $20::timestamptz[]
+               )
+               ON CONFLICT (id) DO UPDATE SET
+                 wholesale_price = EXCLUDED.wholesale_price,
+                 wholesale_dhaka = EXCLUDED.wholesale_dhaka,
+                 retail_price = EXCLUDED.retail_price,
+                 min_wholesale = EXCLUDED.min_wholesale,
+                 max_wholesale = EXCLUDED.max_wholesale,
+                 min_retail = EXCLUDED.min_retail,
+                 max_retail = EXCLUDED.max_retail,
+                 change_24h = EXCLUDED.change_24h,
+                 trend = EXCLUDED.trend,
+                 source = EXCLUDED.source,
+                 last_updated = EXCLUDED.last_updated`,
+              [
+                col('id'), col('district'), col('upazila'), col('market_name'), col('market_name_bn'),
+                col('crop_name'), col('bangla_name'), col('category'), col('wholesale_price'),
+                col('wholesale_dhaka'), col('retail_price'), col('min_wholesale'), col('max_wholesale'),
+                col('min_retail'), col('max_retail'), col('unit'), col('change_24h'), col('trend'),
+                col('source'), col('last_updated'),
+              ]
+            );
+            neonCount += c.length;
+          }
+        } catch (e: any) {
+          console.warn('[DAM Sync] Neon upsert warning:', e.message);
+        }
+      }
+
+      lastMarketSyncAt = Date.now();
+      return res.json({
+        success: true,
+        mode: result.mode,
+        scrapedCrops: result.scrapedCrops,
+        updatedRows: { neon: neonCount, sqlite: sqliteCount },
+        lastUpdated: result.fetchedAt,
+        note: result.note,
+      });
+    } finally {
+      marketSyncInFlight = false;
+    }
+  } catch (err: any) {
+    console.error('[DAM Sync] Error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
