@@ -505,8 +505,15 @@ export default function App() {
     );
   }
 
+  const isPublicLanding = !currentUser && activeView === 'dashboard' && !viewedUser;
+
   return (
-    <div className="min-h-screen overflow-x-hidden bg-stone-100/70 text-stone-900 flex flex-col font-sans transition-colors">
+    <div
+      className={`min-h-screen w-full overflow-x-hidden ${
+        isPublicLanding ? 'bg-transparent' : 'bg-stone-100/70'
+      } text-stone-900 flex flex-col font-sans transition-colors`}
+      style={isPublicLanding ? { backgroundColor: 'transparent' } : undefined}
+    >
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 bg-stone-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold border border-stone-700 animate-fade-in">
@@ -901,10 +908,16 @@ export default function App() {
       )}
 
       {/* Footer */}
-      <footer className="bg-white border-t border-stone-200 mt-12 py-6 text-xs text-stone-500">
+      <footer
+        className={`relative z-10 mt-12 py-6 text-xs ${
+          isPublicLanding
+            ? 'landing-glass-footer bg-white/90 dark:bg-slate-950/85 backdrop-blur-md border-t border-emerald-900/15 dark:border-white/15 text-slate-600 dark:text-slate-300'
+            : 'bg-white border-t border-stone-200 text-stone-500'
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-stone-800">{language === 'bn' ? 'আমার হাট (Amar Haat)' : 'Amar Haat (আমার হাট)'}</span>
+            <span className={`font-bold ${isPublicLanding ? 'text-slate-900 dark:text-white' : 'text-stone-800'}`}>{language === 'bn' ? 'আমার হাট (Amar Haat)' : 'Amar Haat (আমার হাট)'}</span>
             <span>•</span>
             <span>{language === 'bn' ? 'স্থানীয় কৃষি, ব্যবসা ও সরবরাহ চেইন প্ল্যাটফর্ম' : 'Local Agriculture, Business & Supply Chain Platform'}</span>
           </div>

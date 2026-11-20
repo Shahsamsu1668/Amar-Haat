@@ -24,7 +24,9 @@ export function initDatabase() {
       password_hash TEXT NOT NULL,
       district TEXT NOT NULL,
       upazila TEXT,
-      verified INTEGER DEFAULT 1,
+      verified INTEGER DEFAULT 0,
+      is_verified INTEGER DEFAULT 0,
+      firebase_uid TEXT,
       farm_size_acres REAL,
       primary_crops TEXT,
       business_name TEXT,
@@ -230,6 +232,12 @@ export function initDatabase() {
     } catch {}
   }
   try {
+    db.prepare("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0").run();
+  } catch {}
+  try {
+    db.prepare("ALTER TABLE users ADD COLUMN firebase_uid TEXT").run();
+  } catch {}
+  try {
     db.prepare("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT 'kg'").run();
   } catch {}
   try {
@@ -425,10 +433,10 @@ function seedDemoUsers() {
       db.prepare(`
         INSERT INTO users (
           id, role, name, name_bn, phone, email, password_hash, district, upazila,
-          verified, shop_name, business_name, created_at, last_login_at
+          verified, is_verified, shop_name, business_name, created_at, last_login_at
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          1, ?, ?, ?, ?
+          1, 1, ?, ?, ?, ?
         )
       `).run(
         u.id, u.role, u.name, u.name_bn || null, u.phone, u.email || null, u.password_hash,

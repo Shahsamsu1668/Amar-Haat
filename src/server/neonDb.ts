@@ -54,7 +54,9 @@ export async function initNeonDatabase(): Promise<void> {
           password_algo TEXT DEFAULT 'bcrypt',
           district TEXT NOT NULL,
           upazila TEXT,
-          verified BOOLEAN DEFAULT TRUE,
+          verified BOOLEAN DEFAULT FALSE,
+          is_verified BOOLEAN DEFAULT FALSE,
+          firebase_uid TEXT,
           farm_size_acres NUMERIC,
           primary_crops JSONB,
           business_name TEXT,
@@ -68,9 +70,12 @@ export async function initNeonDatabase(): Promise<void> {
           created_at TIMESTAMPTZ DEFAULT NOW(),
           last_login_at TIMESTAMPTZ
         );
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid TEXT;
         CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
         CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
         CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+        CREATE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid);
       `);
     } catch (err: any) {
       console.warn('[Neon] users table init warning:', err.message);
@@ -516,15 +521,24 @@ export async function syncLegacyUsersToNeon(legacyUsers: any[] = []): Promise<nu
       const algo = isBcrypt ? 'bcrypt' : 'legacy_djb2';
       const cropsJson = u.primaryCrops ? JSON.stringify(u.primaryCrops) : (u.primary_crops || null);
 
+      const verifiedFlag =
+        u.is_verified !== undefined
+          ? Boolean(u.is_verified)
+          : u.isVerified !== undefined
+            ? Boolean(u.isVerified)
+            : u.verified !== undefined
+              ? Boolean(u.verified)
+              : false;
+
       await pool.query(
         `INSERT INTO users (
           id, role, name, name_bn, phone, email, password_hash, password_algo,
-          district, upazila, verified, farm_size_acres, primary_crops,
+          district, upazila, verified, is_verified, firebase_uid, farm_size_acres, primary_crops,
           business_name, business_type, shop_name, license_number, trade_address,
           two_factor_enabled, security_pin, created_at, last_login_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-          COALESCE($21::timestamptz, NOW()), $22::timestamptz
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+          COALESCE($23::timestamptz, NOW()), $24::timestamptz
         )
         ON CONFLICT (id) DO UPDATE SET
           role = EXCLUDED.role,
@@ -534,6 +548,8 @@ export async function syncLegacyUsersToNeon(legacyUsers: any[] = []): Promise<nu
           district = EXCLUDED.district,
           upazila = COALESCE(EXCLUDED.upazila, users.upazila),
           verified = EXCLUDED.verified,
+          is_verified = COALESCE(users.is_verified, EXCLUDED.is_verified),
+          firebase_uid = COALESCE(EXCLUDED.firebase_uid, users.firebase_uid),
           business_name = COALESCE(EXCLUDED.business_name, users.business_name),
           business_type = COALESCE(EXCLUDED.business_type, users.business_type),
           shop_name = COALESCE(EXCLUDED.shop_name, users.shop_name),
@@ -549,7 +565,9 @@ export async function syncLegacyUsersToNeon(legacyUsers: any[] = []): Promise<nu
           algo,
           u.district || 'Bogura',
           u.upazila || null,
-          u.verified !== undefined ? Boolean(u.verified) : true,
+          verifiedFlag,
+          verifiedFlag,
+          u.firebaseUid || u.firebase_uid || null,
           u.farmSizeAcres || u.farm_size_acres || null,
           cropsJson,
           u.businessName || u.business_name || null,

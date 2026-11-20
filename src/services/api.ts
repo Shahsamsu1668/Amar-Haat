@@ -59,6 +59,7 @@ export const authApi = {
     name: string;
     phone: string;
     password: string;
+    firebaseToken: string;
     email?: string;
     district?: string;
     upazila?: string;
@@ -68,7 +69,9 @@ export const authApi = {
     businessType?: string;
     shopName?: string;
     licenseNumber?: string;
-  }): Promise<{ success: boolean; user: User; message?: string }> {
+    tradeAddress?: string;
+    deliveryAddress?: string;
+  }): Promise<{ success: boolean; user: User; token?: string; message?: string }> {
     return fetchJson('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(userData),

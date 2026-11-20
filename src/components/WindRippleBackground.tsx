@@ -138,7 +138,7 @@ export const WindRippleBackground: React.FC<WindRippleBackgroundProps> = ({
   src,
   containerRef,
   perturbation = 0.009,
-  overlayClassName = 'bg-gradient-to-b from-black/35 via-emerald-950/25 to-black/45',
+  overlayClassName = 'bg-gradient-to-b from-black/15 via-emerald-950/15 to-black/25 dark:from-black/50 dark:via-emerald-950/45 dark:to-black/60',
 }) => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -235,8 +235,8 @@ export const WindRippleBackground: React.FC<WindRippleBackgroundProps> = ({
     const resize = () => {
       if (disposed) return;
       const rect = host.getBoundingClientRect();
-      const w = Math.max(1, Math.round(window.innerWidth || rect.width || host.clientWidth));
-      const h = Math.max(1, Math.round(window.innerHeight || rect.height || host.clientHeight));
+      const w = Math.max(1, Math.round(rect.width || host.clientWidth || window.innerWidth));
+      const h = Math.max(1, Math.round(rect.height || host.clientHeight || window.innerHeight));
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
       const targetW = Math.round(w * dpr);
@@ -353,21 +353,21 @@ export const WindRippleBackground: React.FC<WindRippleBackgroundProps> = ({
       aria-hidden="true"
       className="w-full h-full object-cover pointer-events-none overflow-hidden relative"
     >
-      {/* Static close-up paddy-field background (bg-cover bg-center) for instant render & mobile fallback */}
+      {/* Static close-up paddy-field background (softly blurred & scaled to avoid edge artifacts) */}
       <div
         data-testid="hero-paddy-bg"
-        className="absolute inset-0 w-full h-full object-cover bg-cover bg-center bg-no-repeat bg-emerald-950"
+        className="absolute inset-0 w-full h-full object-cover bg-cover bg-center bg-no-repeat bg-emerald-950 blur-[5px] scale-[1.06]"
         style={{ backgroundImage: `url(${src})` }}
       />
-      {/* Autonomous WebGL ambient wind canvas (w-full h-full object-cover, desktop only) */}
+      {/* Autonomous WebGL ambient wind canvas (softly blurred & scaled inside overflow-hidden wrapper) */}
       <canvas
         ref={canvasRef}
         data-testid="hero-wind-ripple-canvas"
-        className={`absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-500 ${
+        className={`absolute inset-0 w-full h-full object-cover blur-[5px] scale-[1.06] pointer-events-none transition-opacity duration-500 ${
           active ? 'opacity-100' : 'opacity-0'
         }`}
       />
-      {/* Subtle ambient vignette overlay so glassmorphic panels pop cleanly */}
+      {/* Soft dark scrim overlay directly above the blurred paddy field for crisp text contrast */}
       <div className={`absolute inset-0 w-full h-full pointer-events-none ${overlayClassName}`} />
     </div>
   );

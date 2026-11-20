@@ -1,8 +1,18 @@
-import React, { useState, useEffect } from 'react';
-import { Language, UserRole, User } from '../types';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Language, User } from '../types';
 import { AuthStore, LoginResult } from '../data/store';
 import { BANGLADESH_LOCATIONS } from '../data/mockData';
 import { authApi } from '../services/api';
+import {
+  createInvisibleRecaptcha,
+  formatPhoneToE164,
+  isFirebaseClientConfigured,
+  mapFirebaseAuthError,
+  normalizeDigits,
+  sendFirebasePhoneOtp,
+  type ConfirmationResult,
+  type RecaptchaVerifier,
+} from '../services/firebaseClient';
 import {
   Sprout,
   Briefcase,
@@ -14,13 +24,14 @@ import {
   EyeOff,
   ArrowRight,
   ShieldCheck,
-  CheckCircle2,
+  ShieldAlert,
   ArrowLeft,
   User as UserIcon,
-  MapPin,
-  Building,
   KeyRound,
   Sparkles,
+  RefreshCw,
+  Clock,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface AuthPageProps {
@@ -30,6 +41,51 @@ interface AuthPageProps {
   onBack?: () => void;
   initialMode?: 'login' | 'register';
   initialRole?: 'farmer' | 'wholesaler' | 'retailer' | 'consumer';
+}
+
+const OTP_RATE_LIMIT_KEY = 'nb_otp_rate_limit_v1';
+const MAX_OTP_REQUESTS_PER_SESSION = 3;
+const OTP_LOCKOUT_SECONDS = 300; // 5 minutes strict cooldown after 3 requests
+const OTP_RESEND_THROTTLE_SECONDS = 30; // Short anti-spam delay between requests 1..3
+
+interface OtpRateLimitState {
+  count: number;
+  lockoutUntil: number; // epoch ms
+}
+
+function readOtpRateLimit(): OtpRateLimitState {
+  try {
+    const raw = typeof window !== 'undefined' ? sessionStorage.getItem(OTP_RATE_LIMIT_KEY) : null;
+    if (!raw) return { count: 0, lockoutUntil: 0 };
+    const parsed = JSON.parse(raw);
+    const now = Date.now();
+    if (parsed.lockoutUntil && parsed.lockoutUntil <= now) {
+      // Lockout expired — reset session counter cleanly
+      sessionStorage.removeItem(OTP_RATE_LIMIT_KEY);
+      return { count: 0, lockoutUntil: 0 };
+    }
+    return {
+      count: Number(parsed.count) || 0,
+      lockoutUntil: Number(parsed.lockoutUntil) || 0,
+    };
+  } catch {
+    return { count: 0, lockoutUntil: 0 };
+  }
+}
+
+function saveOtpRateLimit(state: OtpRateLimitState): void {
+  try {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(OTP_RATE_LIMIT_KEY, JSON.stringify(state));
+    }
+  } catch {}
+}
+
+function formatCountdown(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({
@@ -44,6 +100,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   useEffect(() => {
     if (initialMode) setMode(initialMode);
   }, [initialMode]);
+
   // ONLY 4 public roles
   const [selectedRole, setSelectedRole] = useState<'farmer' | 'wholesaler' | 'retailer' | 'consumer'>(initialRole);
   useEffect(() => {
@@ -61,11 +118,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [adminPassword, setAdminPassword] = useState('');
   const [adminPin, setAdminPin] = useState('');
 
-  // Lockout State
+  // Login Lockout State
   const [isLocked, setIsLocked] = useState(false);
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
 
-  // Common Registration fields
+  // Registration Step 1 fields
+  const [regStep, setRegStep] = useState<1 | 2>(1);
   const [regName, setRegName] = useState('');
   const [regPhone, setRegPhone] = useState('');
   const [regEmail, setRegEmail] = useState('');
@@ -74,23 +132,55 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [regPassword, setRegPassword] = useState('');
   const [regConfirmPassword, setRegConfirmPassword] = useState('');
 
-  // Wholesaler specific
+  // Role-specific registration fields
   const [businessName, setBusinessName] = useState('');
   const [businessType, setBusinessType] = useState('Wholesaler');
-
-  // Retailer specific
   const [shopName, setShopName] = useState('');
   const [tradeAddress, setTradeAddress] = useState('');
-
-  // Consumer specific
   const [deliveryAddress, setDeliveryAddress] = useState('');
 
+  // Registration Step 2 (Firebase Phone OTP + Invisible reCAPTCHA + Rate Limiting)
+  const [otpCode, setOtpCode] = useState('');
+  const [otpTargetE164, setOtpTargetE164] = useState('');
+  const [otpTargetLocal, setOtpTargetLocal] = useState('');
+  const [otpInfo, setOtpInfo] = useState('');
+  const [otpRequestCount, setOtpRequestCount] = useState<number>(() => readOtpRateLimit().count);
+  const [otpLockoutRemaining, setOtpLockoutRemaining] = useState<number>(() => {
+    const st = readOtpRateLimit();
+    return st.lockoutUntil > Date.now() ? Math.ceil((st.lockoutUntil - Date.now()) / 1000) : 0;
+  });
+  const [otpResendCooldown, setOtpResendCooldown] = useState<number>(0);
+
+  const confirmationResultRef = useRef<ConfirmationResult | null>(null);
+  const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
+  const recaptchaContainerRef = useRef<HTMLDivElement | null>(null);
+
   const [error, setError] = useState('');
+  const [isConflictError, setIsConflictError] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const t = (en: string, bn: string) => (language === 'bn' ? bn : en);
 
-  // Countdown timer for lockout
+  // Cleanly dispose invisible reCAPTCHA verifier
+  const clearRecaptcha = useCallback(() => {
+    if (recaptchaVerifierRef.current) {
+      try {
+        recaptchaVerifierRef.current.clear();
+      } catch {}
+      recaptchaVerifierRef.current = null;
+    }
+    if (recaptchaContainerRef.current) {
+      recaptchaContainerRef.current.innerHTML = '';
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearRecaptcha();
+    };
+  }, [clearRecaptcha]);
+
+  // Countdown timer for login lockout
   useEffect(() => {
     if (lockoutSeconds > 0) {
       const lockTimer = setInterval(() => {
@@ -106,6 +196,32 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
   }, [lockoutSeconds]);
 
+  // Strict 5-minute (300s) OTP lockout countdown timer
+  useEffect(() => {
+    if (otpLockoutRemaining <= 0) return;
+    const timer = setInterval(() => {
+      setOtpLockoutRemaining((prev) => {
+        if (prev <= 1) {
+          // Lockout finished — reset session OTP attempt counter cleanly
+          setOtpRequestCount(0);
+          saveOtpRateLimit({ count: 0, lockoutUntil: 0 });
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [otpLockoutRemaining]);
+
+  // Short throttle countdown between OTP requests 1 -> 2 -> 3
+  useEffect(() => {
+    if (otpResendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setOtpResendCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [otpResendCooldown]);
+
   // Upazilas based on chosen district
   const selectedLocation = BANGLADESH_LOCATIONS.find(
     (l) => l.district.toLowerCase() === regDistrict.toLowerCase()
@@ -116,6 +232,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setIsConflictError(false);
     setLoading(true);
 
     try {
@@ -133,23 +250,28 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           return;
         }
       } catch (backendErr: any) {
-        // Only block local fallback for explicit credential rejection (401/wrong password messages)
-        const msg: string = (backendErr.message || '').toLowerCase();
-        const isCredentialError =
+        // Strictly respect backend credential and verification rejections (401 / 403)
+        const msg: string = (backendErr?.message || '').toLowerCase();
+        const isAuthRejection =
+          msg.includes('not verified') ||
+          msg.includes('otp') ||
           msg.includes('invalid') ||
           msg.includes('incorrect') ||
           msg.includes('wrong password') ||
           msg.includes('unauthorized') ||
-          msg.includes('not found') === false && msg.includes('401');
-        if (isCredentialError && !msg.includes('fetch') && !msg.includes('network') && !msg.includes('failed to fetch')) {
+          msg.includes('no account found') ||
+          msg.includes('forbidden') ||
+          msg.includes('401') ||
+          msg.includes('403');
+        if (isAuthRejection && !msg.includes('failed to fetch') && !msg.includes('networkerror')) {
           setError(backendErr.message);
           setLoading(false);
           return;
         }
-        // Network/server errors: fall through to local store
+        // Only fall through to local store on genuine offline/network failure
       }
 
-      // 2. Fallback to client-side store verification
+      // 2. Fallback to client-side store verification (offline dev only)
       const localResult: LoginResult = AuthStore.login(
         loginIdentifier.trim(),
         loginPassword,
@@ -174,6 +296,15 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           language === 'bn'
             ? 'মোবাইল নম্বর অথবা পাসওয়ার্ড সঠিক নয়। দয়া করে আবার চেষ্টা করুন।'
             : 'Incorrect credentials. Please verify your phone number and password.'
+        );
+        return;
+      }
+
+      if (!localResult.user.verified) {
+        setError(
+          language === 'bn'
+            ? 'আপনার মোবাইল নম্বরটি যাচাইকৃত নয়। লগইন করার আগে OTP যাচাই সম্পন্ন করুন।'
+            : 'Your phone number is not verified. Please complete OTP verification before logging in.'
         );
         return;
       }
@@ -211,75 +342,254 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
   };
 
-  // Handle Registration
-  const handleRegister = async (e: React.FormEvent) => {
+  // Shared Firebase OTP dispatch with invisible reCAPTCHA + strict 3-request / 300s rate-limiting
+  const dispatchFirebaseOtp = async (e164Phone: string, localPhone: string): Promise<boolean> => {
+    // Re-read persisted session rate limit to prevent bypass
+    const currentLimit = readOtpRateLimit();
+    const now = Date.now();
+
+    if (currentLimit.lockoutUntil > now) {
+      const rem = Math.ceil((currentLimit.lockoutUntil - now) / 1000);
+      setOtpLockoutRemaining(rem);
+      setOtpRequestCount(currentLimit.count);
+      setError(
+        language === 'bn'
+          ? `সর্বোচ্চ ৩ বার OTP অনুরোধের সীমা অতিক্রম হয়েছে। অনুগ্রহ করে ${formatCountdown(rem)} পর আবার চেষ্টা করুন।`
+          : `Maximum 3 OTP requests exceeded. Please wait ${formatCountdown(rem)} before requesting another OTP.`
+      );
+      return false;
+    }
+
+    if (currentLimit.count >= MAX_OTP_REQUESTS_PER_SESSION) {
+      const lockoutUntil = now + OTP_LOCKOUT_SECONDS * 1000;
+      saveOtpRateLimit({ count: currentLimit.count, lockoutUntil });
+      setOtpLockoutRemaining(OTP_LOCKOUT_SECONDS);
+      setError(
+        language === 'bn'
+          ? 'সর্বোচ্চ ৩ বার OTP পাঠানো হয়েছে। নিরাপত্তার স্বার্থে ৫ মিনিট (৩০০ সেকেন্ড) পর আবার চেষ্টা করুন।'
+          : 'You have reached the maximum of 3 OTP requests this session. Please wait 5 minutes (300s).'
+      );
+      return false;
+    }
+
+    if (!isFirebaseClientConfigured()) {
+      setError(
+        language === 'bn'
+          ? 'Firebase Phone Auth কনফিগার করা হয়নি। অনুগ্রহ করে পরিবেশ ভেরিয়েবল (VITE_FIREBASE_*) যুক্ত করুন।'
+          : 'Firebase Phone Authentication is not configured. Please add VITE_FIREBASE_* keys to your environment.'
+      );
+      return false;
+    }
+
+    if (!recaptchaContainerRef.current) {
+      setError(t('Security verifier failed to initialize. Please reload.', 'নিরাপত্তা যাচাইকারী লোড হয়নি। পেজ রিলোড করুন।'));
+      return false;
+    }
+
+    // Create fresh invisible RecaptchaVerifier for this dispatch
+    clearRecaptcha();
+    const verifier = createInvisibleRecaptcha(recaptchaContainerRef.current, () => {
+      clearRecaptcha();
+    });
+    recaptchaVerifierRef.current = verifier;
+
+    try {
+      const confirmation = await sendFirebasePhoneOtp(e164Phone, verifier);
+      confirmationResultRef.current = confirmation;
+      setOtpTargetE164(e164Phone);
+      setOtpTargetLocal(localPhone);
+
+      const nextCount = currentLimit.count + 1;
+      setOtpRequestCount(nextCount);
+
+      if (nextCount >= MAX_OTP_REQUESTS_PER_SESSION) {
+        // Strict 5-minute (300s) disable timer on Resend OTP after 3rd request
+        const lockoutUntil = Date.now() + OTP_LOCKOUT_SECONDS * 1000;
+        saveOtpRateLimit({ count: nextCount, lockoutUntil });
+        setOtpLockoutRemaining(OTP_LOCKOUT_SECONDS);
+        setOtpResendCooldown(0);
+      } else {
+        saveOtpRateLimit({ count: nextCount, lockoutUntil: 0 });
+        setOtpResendCooldown(OTP_RESEND_THROTTLE_SECONDS);
+      }
+
+      setOtpInfo(
+        language === 'bn'
+          ? `${e164Phone} নম্বরে ৬ সংখ্যার OTP পাঠানো হয়েছে।`
+          : `A 6-digit verification code has been sent via SMS to ${e164Phone}.`
+      );
+      return true;
+    } catch (firebaseErr: any) {
+      clearRecaptcha();
+      setError(mapFirebaseAuthError(firebaseErr, language));
+      return false;
+    }
+  };
+
+  // Registration Step 1 Submit: Validate details & trigger Firebase Phone OTP
+  const handleStep1SendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setIsConflictError(false);
+    setOtpInfo('');
 
     if (!regName.trim()) {
       setError(language === 'bn' ? 'আপনার পূর্ণ নাম লিখুন।' : 'Please enter your full name.');
       return;
     }
-    if (!regPhone.trim() || regPhone.length < 9) {
-      setError(language === 'bn' ? 'সঠিক ১১ সংখ্যার মোবাইল নম্বর দিন।' : 'Please enter a valid mobile number.');
+
+    const parsedPhone = formatPhoneToE164(regPhone);
+    if (!parsedPhone.valid) {
+      setError(
+        language === 'bn'
+          ? 'সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX বা +88017XXXXXXXX)।'
+          : 'Please enter a valid 11-digit Bangladeshi mobile number (e.g., 017XXXXXXXX or +88017XXXXXXXX).'
+      );
       return;
     }
+
     if (regPassword.length < 6) {
       setError(language === 'bn' ? 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' : 'Password must be at least 6 characters.');
       return;
     }
+
     if (regPassword !== regConfirmPassword) {
       setError(language === 'bn' ? 'উভয় পাসওয়ার্ড একই হতে হবে।' : 'Passwords do not match.');
       return;
     }
 
+    if (selectedRole === 'wholesaler' && !businessName.trim()) {
+      setError(language === 'bn' ? 'আপনার আড়ত বা প্রতিষ্ঠানের নাম লিখুন।' : 'Please enter your wholesale business / arat name.');
+      return;
+    }
+
+    if (selectedRole === 'retailer' && !shopName.trim()) {
+      setError(language === 'bn' ? 'আপনার খুচরা দোকানের নাম লিখুন।' : 'Please enter your retail shop name.');
+      return;
+    }
+
     setLoading(true);
-
-    const payload = {
-      role: selectedRole,
-      name: regName.trim(),
-      phone: regPhone.trim(),
-      email: regEmail.trim(),
-      district: regDistrict,
-      upazila: regUpazila,
-      password: regPassword,
-      businessName: selectedRole === 'wholesaler' ? (businessName.trim() || `${regName}'s Wholesale Arat`) : undefined,
-      businessType: selectedRole === 'wholesaler' ? businessType : undefined,
-      shopName: selectedRole === 'retailer' ? (shopName.trim() || `${regName}'s Agro Shop`) : undefined,
-      tradeAddress: selectedRole === 'retailer' ? tradeAddress.trim() : undefined,
-      deliveryAddress: selectedRole === 'consumer' ? deliveryAddress.trim() : undefined,
-    };
-
     try {
-      // 1. Try persistent backend API
-      try {
-        const res = await authApi.register(payload);
-        if (res && res.success && res.user) {
-          AuthStore.setCurrentUser(res.user);
-          setLoading(false);
-          onAuthSuccess(res.user);
-          return;
-        }
-      } catch (backendErr: any) {
-        if (backendErr.message && !backendErr.message.includes('fetch')) {
-          setError(backendErr.message);
-          setLoading(false);
-          return;
-        }
+      const sent = await dispatchFirebaseOtp(parsedPhone.e164, parsedPhone.local);
+      if (sent) {
+        setOtpCode('');
+        setRegStep(2);
       }
-
-      // 2. Client store fallback
-      const newUser = AuthStore.register(payload as any);
+    } finally {
       setLoading(false);
-      onAuthSuccess(newUser);
-    } catch (err: any) {
-      setLoading(false);
-      setError(err.message || 'Registration failed.');
     }
   };
 
+  // Resend OTP handler on Step 2 (strictly bounded by 3-request limit & 300s lockout)
+  const handleResendOtp = async () => {
+    if (loading || otpLockoutRemaining > 0 || otpResendCooldown > 0) return;
+    setError('');
+    setIsConflictError(false);
+    setOtpInfo('');
+
+    if (!otpTargetE164) {
+      setRegStep(1);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await dispatchFirebaseOtp(otpTargetE164, otpTargetLocal);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Registration Step 2 Submit: Confirm OTP with Firebase -> get ID Token -> POST /api/auth/register
+  const handleStep2VerifyOtpAndRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsConflictError(false);
+
+    const cleanOtp = normalizeDigits(otpCode).replace(/\D/g, '').trim();
+    if (cleanOtp.length !== 6) {
+      setError(
+        language === 'bn'
+          ? 'অনুগ্রহ করে এসএমএস-এ প্রাপ্ত ৬ সংখ্যার সঠিক OTP কোড লিখুন।'
+          : 'Please enter the exact 6-digit OTP code received via SMS.'
+      );
+      return;
+    }
+
+    if (!confirmationResultRef.current) {
+      setError(
+        language === 'bn'
+          ? 'OTP সেশন পাওয়া যায়নি। অনুগ্রহ করে পুনরায় OTP পাঠান।'
+          : 'OTP verification session expired. Please request a new OTP.'
+      );
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 1. Verify OTP with Firebase Auth
+      let firebaseToken: string;
+      try {
+        const userCredential = await confirmationResultRef.current.confirm(cleanOtp);
+        firebaseToken = await userCredential.user.getIdToken(true);
+      } catch (otpErr: any) {
+        setError(mapFirebaseAuthError(otpErr, language));
+        setLoading(false);
+        return;
+      }
+
+      // 2. Submit verified Firebase ID Token + registration details to backend
+      const payload = {
+        role: selectedRole,
+        name: regName.trim(),
+        phone: otpTargetLocal || regPhone.trim(),
+        email: regEmail.trim(),
+        district: regDistrict,
+        upazila: regUpazila,
+        password: regPassword,
+        firebaseToken,
+        businessName: selectedRole === 'wholesaler' ? (businessName.trim() || `${regName}'s Wholesale Arat`) : undefined,
+        businessType: selectedRole === 'wholesaler' ? businessType : undefined,
+        shopName: selectedRole === 'retailer' ? (shopName.trim() || `${regName}'s Agro Shop`) : undefined,
+        tradeAddress: selectedRole === 'retailer' ? tradeAddress.trim() : undefined,
+        deliveryAddress: selectedRole === 'consumer' ? deliveryAddress.trim() : undefined,
+      };
+
+      const res = await authApi.register(payload);
+      if (res && res.success && res.user) {
+        clearRecaptcha();
+        AuthStore.setCurrentUser(res.user);
+        setLoading(false);
+        onAuthSuccess(res.user);
+        return;
+      }
+
+      setError(language === 'bn' ? 'নিবন্ধন সম্পন্ন হয়নি। আবার চেষ্টা করুন।' : 'Registration failed. Please try again.');
+      setLoading(false);
+    } catch (err: any) {
+      const msg = String(err?.message || 'Registration failed.');
+      if (msg.toLowerCase().includes('already exists') || msg.includes('409')) {
+        setIsConflictError(true);
+        setError(
+          language === 'bn'
+            ? 'এই মোবাইল নম্বর দিয়ে ইতিমধ্যেই একটি অ্যাকাউন্ট রয়েছে। অনুগ্রহ করে লগইন করুন।'
+            : 'Account with this number already exists. Please sign in instead.'
+        );
+      } else {
+        setError(msg);
+      }
+      setLoading(false);
+    }
+  };
+
+  const isResendDisabled = loading || otpLockoutRemaining > 0 || otpResendCooldown > 0;
+  const remainingAttempts = Math.max(0, MAX_OTP_REQUESTS_PER_SESSION - otpRequestCount);
+
   return (
     <div className="min-h-screen bg-stone-100 dark:bg-stone-950 flex flex-col justify-center py-10 px-4 sm:px-6 lg:px-8 font-sans">
+      {/* Invisible Firebase reCAPTCHA Mount Point (never display:none so widget mounts silently) */}
+      <div ref={recaptchaContainerRef} id="nb-firebase-recaptcha" className="sr-only" />
+
       {/* Top Bar with Back and Language switch */}
       <div className="max-w-xl w-full mx-auto flex items-center justify-between mb-4">
         {onBack ? (
@@ -406,7 +716,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             <div className="flex bg-stone-100 dark:bg-stone-800/90 p-1 rounded-2xl border border-transparent dark:border-stone-700">
               <button
                 type="button"
-                onClick={() => { setMode('login'); setError(''); }}
+                onClick={() => {
+                  setMode('login');
+                  setRegStep(1);
+                  setError('');
+                  setIsConflictError(false);
+                }}
                 className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
                   mode === 'login'
                     ? 'bg-white dark:bg-stone-900 text-stone-900 dark:text-white shadow-xs'
@@ -417,7 +732,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => { setMode('register'); setError(''); }}
+                onClick={() => {
+                  setMode('register');
+                  setError('');
+                  setIsConflictError(false);
+                }}
                 className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
                   mode === 'register'
                     ? 'bg-white dark:bg-stone-900 text-stone-900 dark:text-white shadow-xs'
@@ -428,48 +747,97 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </button>
             </div>
 
-            {/* Exactly 4 Public Roles Selector */}
-            <div>
-              <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-2">
-                {t('Select Your Role in Supply Chain:', 'আপনার ভূমিকা নির্বাচন করুন:')}
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {[
-                  { id: 'farmer', en: 'Farmer', bn: 'কৃষক', icon: <Sprout className="w-4 h-4" /> },
-                  { id: 'wholesaler', en: 'Wholesaler', bn: 'পাইকার', icon: <Briefcase className="w-4 h-4" /> },
-                  { id: 'retailer', en: 'Retailer', bn: 'খুচরা বিক্রেতা', icon: <Store className="w-4 h-4" /> },
-                  { id: 'consumer', en: 'Consumer', bn: 'ভোক্তা', icon: <ShoppingCart className="w-4 h-4" /> },
-                ].map((r) => {
-                  const isSelected = selectedRole === r.id;
-                  return (
-                    <button
-                      key={r.id}
-                      type="button"
-                      onClick={() => { setSelectedRole(r.id as any); setError(''); }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all cursor-pointer ${
-                        isSelected
-                          ? 'role-card-selected border-emerald-600 dark:border-emerald-500 bg-emerald-50/80 dark:bg-emerald-950/70 text-emerald-900 dark:text-emerald-300 shadow-xs font-black'
-                          : 'role-card-unselected border-stone-200 dark:border-stone-700 bg-stone-50/50 dark:bg-stone-800/90 hover:bg-white dark:hover:bg-stone-700 text-stone-700 dark:text-white font-semibold'
-                      }`}
-                    >
-                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center mb-1.5 transition-colors ${
-                        isSelected ? 'bg-emerald-600 text-white shadow-xs' : 'bg-stone-200 dark:bg-stone-700 text-stone-700 dark:text-white'
-                      }`}>
-                        {r.icon}
-                      </div>
-                      <span className={`text-xs leading-tight font-bold transition-colors ${isSelected ? 'text-emerald-900 dark:text-emerald-300 font-black' : 'text-stone-700 dark:text-white'}`}>
-                        {language === 'bn' ? r.bn : r.en}
-                      </span>
-                    </button>
-                  );
-                })}
+            {/* Role Selector (visible on Login and Register Step 1) */}
+            {(mode === 'login' || regStep === 1) && (
+              <div>
+                <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-2">
+                  {t('Select Your Role in Supply Chain:', 'আপনার ভূমিকা নির্বাচন করুন:')}
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { id: 'farmer', en: 'Farmer', bn: 'কৃষক', icon: <Sprout className="w-4 h-4" /> },
+                    { id: 'wholesaler', en: 'Wholesaler', bn: 'পাইকার', icon: <Briefcase className="w-4 h-4" /> },
+                    { id: 'retailer', en: 'Retailer', bn: 'খুচরা বিক্রেতা', icon: <Store className="w-4 h-4" /> },
+                    { id: 'consumer', en: 'Consumer', bn: 'ভোক্তা', icon: <ShoppingCart className="w-4 h-4" /> },
+                  ].map((r) => {
+                    const isSelected = selectedRole === r.id;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => { setSelectedRole(r.id as any); setError(''); }}
+                        className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all cursor-pointer ${
+                          isSelected
+                            ? 'role-card-selected border-emerald-600 dark:border-emerald-500 bg-emerald-50/80 dark:bg-emerald-950/70 text-emerald-900 dark:text-emerald-300 shadow-xs font-black'
+                            : 'role-card-unselected border-stone-200 dark:border-stone-700 bg-stone-50/50 dark:bg-stone-800/90 hover:bg-white dark:hover:bg-stone-700 text-stone-700 dark:text-white font-semibold'
+                        }`}
+                      >
+                        <div className={`w-8 h-8 rounded-xl flex items-center justify-center mb-1.5 transition-colors ${
+                          isSelected ? 'bg-emerald-600 text-white shadow-xs' : 'bg-stone-200 dark:bg-stone-700 text-stone-700 dark:text-white'
+                        }`}>
+                          {r.icon}
+                        </div>
+                        <span className={`text-xs leading-tight font-bold transition-colors ${isSelected ? 'text-emerald-900 dark:text-emerald-300 font-black' : 'text-stone-700 dark:text-white'}`}>
+                          {language === 'bn' ? r.bn : r.en}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Two-Step Progress Bar for Registration */}
+            {mode === 'register' && (
+              <div className="flex items-center justify-between gap-2 bg-stone-50 dark:bg-stone-900/70 border border-stone-200 dark:border-stone-700 rounded-2xl p-3">
+                <div className={`flex items-center gap-2 text-xs font-bold ${regStep === 1 ? 'text-emerald-700 dark:text-emerald-400' : 'text-emerald-600 dark:text-emerald-300'}`}>
+                  <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black ${
+                    regStep === 1
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300'
+                  }`}>
+                    {regStep === 2 ? <CheckCircle2 className="w-3.5 h-3.5" /> : '1'}
+                  </span>
+                  <span>{t('Account Details', 'অ্যাকাউন্ট তথ্য')}</span>
+                </div>
+                <div className="flex-1 h-0.5 bg-stone-200 dark:bg-stone-700 mx-1 rounded-full overflow-hidden">
+                  <div className={`h-full bg-emerald-600 transition-all duration-300 ${regStep === 2 ? 'w-full' : 'w-1/2'}`} />
+                </div>
+                <div className={`flex items-center gap-2 text-xs font-bold ${regStep === 2 ? 'text-emerald-700 dark:text-emerald-400' : 'text-stone-400 dark:text-stone-500'}`}>
+                  <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black ${
+                    regStep === 2
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-stone-200 dark:bg-stone-800 text-stone-500 dark:text-stone-400'
+                  }`}>
+                    2
+                  </span>
+                  <span>{t('OTP Verification', 'OTP যাচাই')}</span>
+                </div>
+              </div>
+            )}
 
             {error && (
-              <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs font-bold flex items-center gap-2">
-                <span>⚠️</span>
-                <span>{error}</span>
+              <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs font-bold space-y-2">
+                <div className="flex items-start gap-2">
+                  <span>⚠️</span>
+                  <span>{error}</span>
+                </div>
+                {isConflictError && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLoginIdentifier(otpTargetLocal || regPhone);
+                      setMode('login');
+                      setRegStep(1);
+                      setError('');
+                      setIsConflictError(false);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 underline cursor-pointer"
+                  >
+                    <span>{t('Switch to Sign In with this number', 'এই নম্বর দিয়ে লগইন করুন')}</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                )}
               </div>
             )}
 
@@ -526,28 +894,26 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </form>
-            ) : (
-              /* REGISTRATION FORM (Minimal, Role-Specific, Clickable Crop Chips) */
-              <form onSubmit={handleRegister} className="space-y-4">
-                {/* Farmer Friendly notice */}
+            ) : regStep === 1 ? (
+              /* REGISTRATION STEP 1: User Details */
+              <form onSubmit={handleStep1SendOtp} className="space-y-4">
                 {selectedRole === 'farmer' && (
                   <div className="p-3 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/60 rounded-xl text-xs text-emerald-900 dark:text-emerald-200 font-medium flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                     <span>
                       {t(
-                        'Easy registration for farmers! Just enter your name, mobile number, and password.',
-                        'কৃষকদের জন্য সহজ নিবন্ধন! আপনার নাম, মোবাইল নম্বর এবং পাসওয়ার্ড দিয়ে অ্যাকাউন্ট খুলুন।'
+                        'Easy & secure registration! Enter your details and verify your mobile number via SMS OTP.',
+                        'সহজ ও নিরাপদ নিবন্ধন! আপনার তথ্য দিন এবং এসএমএস OTP যাচাই করে অ্যাকাউন্ট খুলুন।'
                       )}
                     </span>
                   </div>
                 )}
 
-                {/* Consumer notice */}
                 {selectedRole === 'consumer' && (
                   <div className="p-3 bg-purple-50 dark:bg-purple-950/50 border border-purple-200 dark:border-purple-800/60 rounded-xl text-xs text-purple-900 dark:text-purple-200 font-medium">
                     {t(
-                      'Tip: Consumers can immediately browse and place orders as guests without any account!',
-                      'পরামর্শ: ভোক্তারা নিবন্ধন ছাড়াই সরাসরি পণ্য ঝুড়িতে নিয়ে অর্ডার করতে পারেন।'
+                      'Tip: Consumers can also browse and place orders as guests, or create an OTP-verified account below.',
+                      'পরামর্শ: ভোক্তারা নিবন্ধন ছাড়াই পণ্য দেখতে পারেন, অথবা OTP যাচাই করে স্থায়ী অ্যাকাউন্ট খুলতে পারেন।'
                     )}
                   </div>
                 )}
@@ -573,7 +939,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 {/* Mobile Phone Number */}
                 <div>
                   <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1">
-                    {t('Mobile Phone Number', 'মোবাইল নম্বর')} *
+                    {t('Mobile Phone Number (SMS OTP Required)', 'মোবাইল নম্বর (SMS OTP যাচাই বাধ্যতামূলক)')} *
                   </label>
                   <div className="relative">
                     <Phone className="w-4 h-4 text-stone-400 dark:text-stone-400 absolute left-3.5 top-3" />
@@ -582,10 +948,16 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       required
                       value={regPhone}
                       onChange={(e) => setRegPhone(e.target.value)}
-                      placeholder="017XXXXXXXX"
+                      placeholder="017XXXXXXXX (+880)"
                       className="w-full pl-10 pr-3.5 py-2.5 text-sm rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-900 dark:text-white placeholder:text-stone-400 dark:placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
                     />
                   </div>
+                  <p className="text-[11px] text-stone-500 dark:text-stone-400 mt-1">
+                    {t(
+                      'Protected by invisible reCAPTCHA. A 6-digit Firebase OTP will be sent to verify this number.',
+                      'অদৃশ্য reCAPTCHA সুরক্ষিত। নম্বর যাচাই করতে ৬ সংখ্যার Firebase OTP পাঠানো হবে।'
+                    )}
+                  </p>
                 </div>
 
                 {/* District and Upazila */}
@@ -629,9 +1001,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </div>
                 </div>
 
-                {/* ROLE SPECIFIC INPUTS */}
-
-                {/* 1. WHOLESALER: Arat Name & Business Type */}
+                {/* Role-Specific Inputs */}
                 {selectedRole === 'wholesaler' && (
                   <div className="space-y-3 p-3.5 bg-blue-50/50 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/50">
                     <div>
@@ -664,7 +1034,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </div>
                 )}
 
-                {/* 3. RETAILER: Shop Name */}
                 {selectedRole === 'retailer' && (
                   <div className="space-y-3 p-3.5 bg-amber-50/50 dark:bg-amber-950/40 rounded-2xl border border-amber-100 dark:border-amber-900/50">
                     <div>
@@ -695,7 +1064,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </div>
                 )}
 
-                {/* 4. CONSUMER: Delivery Address */}
                 {selectedRole === 'consumer' && (
                   <div>
                     <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1">
@@ -742,13 +1110,159 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </div>
                 </div>
 
+                {/* Lockout Status Banner if 3-request limit already triggered */}
+                {otpLockoutRemaining > 0 && (
+                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs font-bold flex items-center gap-2">
+                    <Clock className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span>
+                      {t(
+                        `OTP limit reached (3/3). Please wait ${formatCountdown(otpLockoutRemaining)} before requesting a new OTP.`,
+                        `সর্বোচ্চ OTP সীমা পূর্ণ (৩/৩)। নতুন OTP পাঠাতে ${formatCountdown(otpLockoutRemaining)} অপেক্ষা করুন।`
+                      )}
+                    </span>
+                  </div>
+                )}
+
                 <button
                   type="submit"
-                  disabled={loading}
-                  className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                  disabled={loading || otpLockoutRemaining > 0}
+                  className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  <span>{loading ? t('Creating Account...', 'অ্যাকাউন্ট তৈরি হচ্ছে...') : t('Complete Registration', 'নিবন্ধন সম্পন্ন করুন')}</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>
+                    {loading
+                      ? t('Sending OTP...', 'OTP পাঠানো হচ্ছে...')
+                      : otpLockoutRemaining > 0
+                        ? t(`Wait ${formatCountdown(otpLockoutRemaining)}`, `অপেক্ষা করুন ${formatCountdown(otpLockoutRemaining)}`)
+                        : t('Send OTP & Continue', 'OTP পাঠান ও এগিয়ে যান')}
+                  </span>
+                  {!loading && otpLockoutRemaining === 0 && <ArrowRight className="w-4 h-4" />}
+                </button>
+              </form>
+            ) : (
+              /* REGISTRATION STEP 2: Firebase Phone OTP Verification */
+              <form onSubmit={handleStep2VerifyOtpAndRegister} className="space-y-4">
+                {/* Mandatory Anti-Social Engineering Security Warning Banner */}
+                <div
+                  role="alert"
+                  data-testid="otp-security-warning"
+                  className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/70 border-2 border-amber-400 dark:border-amber-500/80 text-amber-950 dark:text-amber-100 shadow-sm space-y-1.5"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <ShieldAlert className="w-5 h-5 text-red-600 dark:text-amber-300 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="text-xs sm:text-sm font-black leading-snug text-red-800 dark:text-amber-200">
+                        NativeBazar কর্তৃপক্ষ বা অন্য কাউকে আপনার OTP পিন বলবেন না। পিন শেয়ার করলে আপনার অ্যাকাউন্ট হ্যাক হতে পারে।
+                      </p>
+                      {language === 'en' && (
+                        <p className="text-[11px] font-semibold text-amber-900/90 dark:text-amber-200/90">
+                          Never share your OTP PIN with NativeBazar staff or anyone else. Sharing your PIN may compromise your account.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sent Phone Summary & Edit Details */}
+                <div className="p-3.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/70 flex items-center justify-between gap-3">
+                  <div className="text-xs">
+                    <span className="text-stone-500 dark:text-stone-400 block font-medium">
+                      {t('Verification SMS sent to:', 'যাচাইকরণ কোড পাঠানো হয়েছে:')}
+                    </span>
+                    <span className="font-mono font-black text-emerald-800 dark:text-emerald-300 text-sm">
+                      {otpTargetE164 || regPhone}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => {
+                      setRegStep(1);
+                      setError('');
+                      setIsConflictError(false);
+                      setOtpInfo('');
+                    }}
+                    className="text-xs font-bold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer shrink-0"
+                  >
+                    {t('Change Number', 'নম্বর পরিবর্তন')}
+                  </button>
+                </div>
+
+                {otpInfo && (
+                  <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{otpInfo}</span>
+                  </div>
+                )}
+
+                {/* 6-Digit OTP Input */}
+                <div>
+                  <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1.5">
+                    {t('Enter 6-Digit OTP Code', '৬ সংখ্যার OTP কোড লিখুন')} *
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    required
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(normalizeDigits(e.target.value).replace(/\D/g, '').slice(0, 6))}
+                    placeholder="• • • • • •"
+                    className="w-full px-4 py-3 text-center text-xl tracking-[0.45em] font-mono font-black rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-white dark:bg-stone-800 text-stone-900 dark:text-white placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                {/* Rate-Limit & Resend OTP Controls */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-stone-50 dark:bg-stone-900/70 border border-stone-200 dark:border-stone-700 text-xs">
+                  <div className="flex items-center gap-1.5 text-stone-600 dark:text-stone-300 font-semibold">
+                    <Clock className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400 shrink-0" />
+                    {otpLockoutRemaining > 0 ? (
+                      <span className="text-red-700 dark:text-red-300 font-bold">
+                        {t(
+                          `Limit exceeded (3/3). Locked for ${formatCountdown(otpLockoutRemaining)}`,
+                          `সীমা অতিক্রম (৩/৩)। ${formatCountdown(otpLockoutRemaining)} পর আবার চেষ্টা করুন`
+                        )}
+                      </span>
+                    ) : (
+                      <span>
+                        {t(
+                          `OTP requests used: ${otpRequestCount}/${MAX_OTP_REQUESTS_PER_SESSION} (${remainingAttempts} left)`,
+                          `OTP অনুরোধ: ${otpRequestCount}/${MAX_OTP_REQUESTS_PER_SESSION} (বাকি ${remainingAttempts} বার)`
+                        )}
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    data-testid="resend-otp-btn"
+                    disabled={isResendDisabled}
+                    onClick={handleResendOtp}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed bg-white dark:bg-stone-800 border-stone-300 dark:border-stone-600 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-stone-700"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    <span>
+                      {otpLockoutRemaining > 0
+                        ? t(`Resend in ${formatCountdown(otpLockoutRemaining)}`, `পুনরায় পাঠান (${formatCountdown(otpLockoutRemaining)})`)
+                        : otpResendCooldown > 0
+                          ? t(`Resend (${otpResendCooldown}s)`, `পুনরায় পাঠান (${otpResendCooldown}s)`)
+                          : t('Resend OTP', 'পুনরায় OTP পাঠান')}
+                    </span>
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading || otpCode.length < 6}
+                  className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>
+                    {loading
+                      ? t('Verifying & Creating Account...', 'যাচাই ও অ্যাকাউন্ট তৈরি হচ্ছে...')
+                      : t('Verify OTP & Complete Registration', 'OTP যাচাই ও নিবন্ধন সম্পন্ন করুন')}
+                  </span>
                 </button>
               </form>
             )}

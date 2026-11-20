@@ -44,6 +44,11 @@ import {
   normalizePhoneNumber,
   isValidSmsPhone,
 } from './src/server/smsService.js';
+import {
+  verifyFirebaseIdToken,
+  getPhoneLookupVariants,
+  FirebaseAuthVerificationError,
+} from './src/server/firebaseAdmin.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -653,13 +658,22 @@ app.get('/api/health/readiness', async (_req, res) => {
 
 // ─── AUTHENTICATION ENDPOINTS (NO DEMO ACCOUNTS) ─────────────────────────────
 
-// Register new user: Farmer, Wholesaler, Retailer, Consumer
+// Register new user: Farmer, Wholesaler, Retailer, Consumer (Strictly requires Firebase Phone OTP verification)
 app.post('/api/auth/register', async (req, res) => {
   try {
     const {
-      role, name, phone, password, email = '', district = 'Bogura', upazila = '',
+      role, name, password, firebaseToken, email = '', district = 'Bogura', upazila = '',
       farmSizeAcres, primaryCrops, businessName, businessType, shopName, licenseNumber, tradeAddress,
+      deliveryAddress,
     } = req.body;
+
+    // 1. Require Firebase ID Token from completed Phone OTP verification
+    if (!firebaseToken || typeof firebaseToken !== 'string' || !firebaseToken.trim()) {
+      return res.status(401).json({
+        error: 'Phone OTP verification is required to register. Please verify your mobile number first.',
+        code: 'FIREBASE_TOKEN_REQUIRED',
+      });
+    }
 
     const allowedRoles = ['farmer', 'wholesaler', 'retailer', 'consumer'];
     const canonicalRole = (role || '').toLowerCase();
@@ -667,82 +681,131 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: `Invalid role. Public registration permitted only for: ${allowedRoles.join(', ')}` });
     }
 
-    if (!name || !phone || !password) {
-      return res.status(400).json({ error: 'Name, phone number, and password are required.' });
+    if (!name || !String(name).trim() || !password) {
+      return res.status(400).json({ error: 'Name and password are required.' });
     }
 
-    if (phone.length < 9) {
-      return res.status(400).json({ error: 'Please enter a valid phone number.' });
-    }
-
-    if (password.length < 6) {
+    if (String(password).length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
     }
 
-    // Check if phone is already registered in Neon (with fallback to SQLite)
-    let existing: any = null;
+    // 2. Cryptographically verify Firebase ID Token & extract verified phone number
+    let verifiedAuth;
     try {
-      const neonRes = await pool.query('SELECT id, role, phone FROM users WHERE phone = $1 LIMIT 1', [phone]);
-      if (neonRes.rows.length > 0) existing = neonRes.rows[0];
-    } catch (checkErr) {
-      console.warn('[Neon] Check existing user query fallback to SQLite:', checkErr);
+      verifiedAuth = await verifyFirebaseIdToken(firebaseToken);
+    } catch (verifyErr: any) {
+      const statusCode =
+        verifyErr instanceof FirebaseAuthVerificationError ? verifyErr.statusCode : 401;
+      const code =
+        verifyErr instanceof FirebaseAuthVerificationError ? verifyErr.code : 'INVALID_FIREBASE_TOKEN';
+      return res.status(statusCode).json({
+        error: verifyErr?.message || 'Firebase phone token verification failed.',
+        code,
+      });
     }
-    if (!existing) {
-      existing = db.prepare('SELECT id, role, phone FROM users WHERE phone = ?').get(phone) as any;
-    }
-    if (existing) {
-      return res.status(409).json({ error: `An account with phone number ${phone} is already registered (${existing.role}). Please log in.` });
-    }
+
+    const verifiedPhone = verifiedAuth.canonicalPhone;
+    const phoneVariants = verifiedAuth.lookupVariants;
+    const firebaseUid = verifiedAuth.uid;
 
     const userId = `usr-${canonicalRole}-${Date.now()}`;
     const passwordHash = await hashPassword(password);
     const nowIso = new Date().toISOString();
+    const cleanName = String(name).trim();
 
-    // 1. Insert into Neon Cloud PostgreSQL
-    try {
-      await pool.query(`
-        INSERT INTO users (
-          id, role, name, phone, email, password_hash, password_algo, district, upazila, verified,
-          farm_size_acres, primary_crops, business_name, business_type, shop_name,
-          license_number, trade_address, created_at, last_login_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, 'bcrypt', $7, $8, true,
-          $9, $10, $11, $12, $13,
-          $14, $15, $16, $17
-        )
-      `, [
-        userId,
-        canonicalRole,
-        name,
-        phone,
-        email || null,
-        passwordHash,
-        district,
-        upazila || null,
-        farmSizeAcres ? Number(farmSizeAcres) : null,
-        primaryCrops ? (Array.isArray(primaryCrops) ? JSON.stringify(primaryCrops) : primaryCrops) : null,
-        businessName || null,
-        businessType || null,
-        shopName || null,
-        licenseNumber || null,
-        tradeAddress || null,
-        nowIso,
-        nowIso
-      ]);
-    } catch (neonInsertErr: any) {
-      console.error('[Neon] Insert user failed:', neonInsertErr.message);
-      return res.status(500).json({ error: 'Failed to create user account in cloud database.' });
+    // 3. Duplicate Check Guard + Atomic Insert in Neon PostgreSQL (or SQLite fallback in offline dev)
+    if (isNeonConfigured) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const dupRes = await client.query(
+          'SELECT id, role, phone FROM users WHERE phone = ANY($1::text[]) LIMIT 1',
+          [phoneVariants]
+        );
+        if (dupRes.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'Account with this number already exists',
+            code: 'PHONE_ALREADY_EXISTS',
+          });
+        }
+
+        await client.query(`
+          INSERT INTO users (
+            id, role, name, phone, email, password_hash, password_algo, district, upazila,
+            verified, is_verified, firebase_uid,
+            farm_size_acres, primary_crops, business_name, business_type, shop_name,
+            license_number, trade_address, delivery_address, created_at, last_login_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, 'bcrypt', $7, $8,
+            true, true, $9,
+            $10, $11, $12, $13, $14,
+            $15, $16, $17, $18, $19
+          )
+        `, [
+          userId,
+          canonicalRole,
+          cleanName,
+          verifiedPhone,
+          email || null,
+          passwordHash,
+          district,
+          upazila || null,
+          firebaseUid,
+          farmSizeAcres ? Number(farmSizeAcres) : null,
+          primaryCrops ? (Array.isArray(primaryCrops) ? JSON.stringify(primaryCrops) : primaryCrops) : null,
+          businessName || null,
+          businessType || null,
+          shopName || null,
+          licenseNumber || null,
+          tradeAddress || null,
+          deliveryAddress || null,
+          nowIso,
+          nowIso,
+        ]);
+
+        await client.query('COMMIT');
+      } catch (neonInsertErr: any) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {}
+        if (neonInsertErr?.code === '23505') {
+          return res.status(409).json({
+            error: 'Account with this number already exists',
+            code: 'PHONE_ALREADY_EXISTS',
+          });
+        }
+        console.error('[Neon] Insert verified user failed:', neonInsertErr.message);
+        return res.status(500).json({ error: 'Failed to create user account in cloud database.' });
+      } finally {
+        client.release();
+      }
+    } else {
+      // Offline SQLite fallback duplicate guard
+      const placeholders = phoneVariants.map(() => '?').join(',');
+      const existingSqlite = db
+        .prepare(`SELECT id, role, phone FROM users WHERE phone IN (${placeholders}) LIMIT 1`)
+        .get(...phoneVariants) as any;
+      if (existingSqlite) {
+        return res.status(409).json({
+          error: 'Account with this number already exists',
+          code: 'PHONE_ALREADY_EXISTS',
+        });
+      }
     }
 
-    // 2. Sync to local SQLite for backwards compatibility
+    // 4. Persist / mirror verified user in local SQLite
     try {
       const insertStmt = db.prepare(`
         INSERT INTO users (
-          id, role, name, phone, email, password_hash, district, upazila, verified,
+          id, role, name, phone, email, password_hash, district, upazila,
+          verified, is_verified, firebase_uid,
           farm_size_acres, primary_crops, business_name, business_type, shop_name,
           license_number, trade_address, created_at, last_login_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, 1,
+          ?, ?, ?, ?, ?, ?, ?, ?,
+          1, 1, ?,
           ?, ?, ?, ?, ?,
           ?, ?, ?, ?
         )
@@ -750,12 +813,13 @@ app.post('/api/auth/register', async (req, res) => {
       insertStmt.run(
         userId,
         canonicalRole,
-        name,
-        phone,
+        cleanName,
+        verifiedPhone,
         email || null,
         passwordHash,
         district,
         upazila || null,
+        firebaseUid,
         farmSizeAcres ? Number(farmSizeAcres) : null,
         primaryCrops ? (Array.isArray(primaryCrops) ? JSON.stringify(primaryCrops) : primaryCrops) : null,
         businessName || null,
@@ -766,29 +830,42 @@ app.post('/api/auth/register', async (req, res) => {
         nowIso,
         nowIso
       );
-    } catch (sqliteErr) {
-      console.warn('[Sync] SQLite user mirror notice:', sqliteErr);
+    } catch (sqliteErr: any) {
+      if (!isNeonConfigured) {
+        if (String(sqliteErr?.code || '').includes('SQLITE_CONSTRAINT')) {
+          return res.status(409).json({
+            error: 'Account with this number already exists',
+            code: 'PHONE_ALREADY_EXISTS',
+          });
+        }
+        throw sqliteErr;
+      }
+      console.warn('[Sync] SQLite user mirror notice:', sqliteErr?.message || sqliteErr);
     }
 
-    // 3. Issue server-side session in Neon
+    // 5. Issue server-side session token
     const { rawToken } = await createSession(userId, canonicalRole, req);
     res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
 
     const safeUser = {
       id: userId,
       role: canonicalRole,
-      name,
-      phone,
+      name: cleanName,
+      phone: verifiedPhone,
       email,
       district,
       upazila,
       verified: true,
+      isVerified: true,
+      firebaseUid,
       farmSizeAcres: farmSizeAcres ? Number(farmSizeAcres) : undefined,
       primaryCrops: primaryCrops || undefined,
       businessName,
       businessType,
       shopName,
       licenseNumber,
+      tradeAddress,
+      deliveryAddress,
       createdAt: nowIso,
       sessionToken: rawToken,
     };
@@ -798,8 +875,8 @@ app.post('/api/auth/register', async (req, res) => {
       jsonDb.addUser({
         id: userId,
         role: canonicalRole as any,
-        name,
-        phone,
+        name: cleanName,
+        phone: verifiedPhone,
         email: email || undefined,
         passwordHash,
         district,
@@ -821,6 +898,7 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Registration successful!',
+      token: rawToken,
       user: safeUser,
     });
   } catch (err: any) {
@@ -829,7 +907,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Login for registered users
+// Login for registered users (Strictly rejects unverified accounts where is_verified === false)
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { identifier, password, role } = req.body;
@@ -837,13 +915,17 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Phone/Email and password are required.' });
     }
 
+    const cleanIdentifier = String(identifier).trim();
+    const phoneVariants = getPhoneLookupVariants(cleanIdentifier);
+    const lookupPhones = phoneVariants.length > 0 ? phoneVariants : [cleanIdentifier];
+
     let user: any = null;
 
     // 1. Check Neon PostgreSQL
     if (isNeonConfigured) {
       try {
-        let q = 'SELECT * FROM users WHERE (phone = $1 OR email = $2)';
-        const params: any[] = [identifier, identifier];
+        let q = 'SELECT * FROM users WHERE (phone = ANY($1::text[]) OR email = $2)';
+        const params: any[] = [lookupPhones, cleanIdentifier];
         if (role) {
           q += ' AND role = $3';
           params.push(role);
@@ -860,8 +942,9 @@ app.post('/api/auth/login', async (req, res) => {
 
     // Fallback to SQLite if not found in Neon
     if (!user) {
-      let query = 'SELECT * FROM users WHERE (phone = ? OR email = ?)';
-      const params: any[] = [identifier, identifier];
+      const placeholders = lookupPhones.map(() => '?').join(',');
+      let query = `SELECT * FROM users WHERE (phone IN (${placeholders}) OR email = ?)`;
+      const params: any[] = [...lookupPhones, cleanIdentifier];
       if (role) {
         query += ' AND role = ?';
         params.push(role);
@@ -888,7 +971,30 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Incorrect password. Please try again.' });
     }
 
-    // 2. Transparent password migration: safely upgrade legacy hash to modern bcrypt
+    // 2. Strict Verification Login Guard: explicitly reject any user where is_verified is false/0/null
+    const isUserVerified =
+      user.is_verified === true ||
+      user.is_verified === 1 ||
+      user.is_verified === 'true' ||
+      user.is_verified === '1';
+
+    if (!isUserVerified) {
+      if (isNeonConfigured) {
+        try {
+          await pool.query(
+            `INSERT INTO login_audit_logs (user_id, phone, role, status, ip_address, user_agent, details)
+             VALUES ($1, $2, $3, 'BLOCKED_UNVERIFIED', $4, $5, 'Login rejected: account is_verified is false')`,
+            [user.id, user.phone, user.role, req.ip || '127.0.0.1', req.headers['user-agent'] || 'Web Client']
+          );
+        } catch {}
+      }
+      return res.status(403).json({
+        error: 'Your phone number is not verified. Only OTP-verified accounts are permitted to log in.',
+        code: 'ACCOUNT_NOT_VERIFIED',
+      });
+    }
+
+    // 3. Transparent password migration: safely upgrade legacy hash to modern bcrypt
     if (needsRehash) {
       try {
         const modernHash = await hashPassword(password);
@@ -916,7 +1022,7 @@ app.post('/api/auth/login', async (req, res) => {
       db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(nowIso, user.id);
     } catch {}
 
-    // 3. Issue server-side revocable session in Neon PostgreSQL (with SQLite fallback)
+    // 4. Issue server-side revocable session in Neon PostgreSQL (with SQLite fallback)
     const { rawToken } = await createSession(user.id, user.role, req);
     res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
 
@@ -947,7 +1053,9 @@ app.post('/api/auth/login', async (req, res) => {
       email: user.email,
       district: user.district,
       upazila: user.upazila,
-      verified: Boolean(user.verified),
+      verified: true,
+      isVerified: true,
+      firebaseUid: user.firebase_uid || user.firebaseUid,
       farmSizeAcres: user.farm_size_acres || user.farmSizeAcres,
       primaryCrops: primaryCropsParsed,
       businessName: user.business_name || user.businessName,
@@ -968,6 +1076,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     return res.json({
       success: true,
+      token: rawToken,
       user: safeUser,
     });
   } catch (err: any) {

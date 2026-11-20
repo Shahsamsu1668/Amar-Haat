@@ -1,5 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Hind+Siliguri:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ─── DESIGN TOKENS ─────────────────────────────────────────────────── */
 :root {
@@ -923,7 +924,7 @@ input:checked + .toggle-track::before { transform: translateX(18px); }
 }
 
 /* ── Footer ──────────────────────────────────────────────────────────── */
-.dark footer {
+.dark footer:not(.landing-glass-footer) {
   background-color: #161b22 !important;
   border-color: #30363d !important;
 }

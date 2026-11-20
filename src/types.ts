@@ -34,6 +34,8 @@ export interface User {
 
   profileImageUrl?: string;
   verified: boolean;
+  isVerified?: boolean;
+  firebaseUid?: string;
   createdAt: string;
   // Security & Authentication
   passwordHash?: string;

@@ -13,6 +13,7 @@ export interface RegisterPayload {
   phone: string;
   email?: string;
   password: string;
+  firebaseToken: string;
   role: 'farmer' | 'wholesaler' | 'retailer' | 'consumer';
   district: string;
   upazila?: string;
