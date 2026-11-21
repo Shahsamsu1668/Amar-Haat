@@ -78,6 +78,27 @@ export const authApi = {
     });
   },
 
+  async googleRegisterLogin(payload: Record<string, any> & { idToken: string }): Promise<{ success: boolean; user: User; token?: string; message?: string; existing?: boolean }> {
+    return fetchJson('/api/auth/google-register-login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async sendEmailOtp(email: string): Promise<{ success: boolean; message?: string; cooldownSeconds?: number; expiresInSeconds?: number }> {
+    return fetchJson('/api/auth/send-email-otp', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async verifyEmailOtp(payload: Record<string, any> & { email: string; otp: string }): Promise<{ success: boolean; user: User; token?: string; message?: string; existing?: boolean }> {
+    return fetchJson('/api/auth/verify-email-otp', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   async login(credentials: {
     identifier: string;
     password: string;

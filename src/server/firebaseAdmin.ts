@@ -221,3 +221,46 @@ export async function verifyFirebaseIdToken(
     decoded,
   };
 }
+
+
+export interface VerifiedGoogleResult {
+  uid: string;
+  email: string;
+  name?: string;
+}
+
+/**
+ * Verifies a Firebase ID token obtained via Google Sign-In (`signInWithPopup` +
+ * `GoogleAuthProvider`) and returns the Google-verified email + Firebase UID.
+ */
+export async function verifyFirebaseGoogleIdToken(idToken: string): Promise<VerifiedGoogleResult> {
+  if (!idToken || typeof idToken !== 'string' || !idToken.trim()) {
+    throw new FirebaseAuthVerificationError('Google sign-in token is required.', 401, 'MISSING_GOOGLE_TOKEN');
+  }
+  const app = initFirebaseAdmin();
+  if (!app) {
+    throw new FirebaseAuthVerificationError(
+      'Firebase Admin SDK is not configured on the server. Google sign-in requires Firebase credentials.',
+      503,
+      'FIREBASE_ADMIN_NOT_CONFIGURED'
+    );
+  }
+  let decoded: DecodedIdToken;
+  try {
+    decoded = await getAuth(app).verifyIdToken(idToken.trim());
+  } catch (err: any) {
+    const expired = String(err?.code || '') === 'auth/id-token-expired';
+    throw new FirebaseAuthVerificationError(
+      expired ? 'Google sign-in session expired. Please try again.' : 'Invalid Google sign-in token.',
+      401,
+      expired ? 'GOOGLE_TOKEN_EXPIRED' : 'INVALID_GOOGLE_TOKEN'
+    );
+  }
+  if (decoded.firebase?.sign_in_provider !== 'google.com') {
+    throw new FirebaseAuthVerificationError('Token was not issued by Google sign-in.', 401, 'NOT_GOOGLE_PROVIDER');
+  }
+  if (!decoded.email || decoded.email_verified !== true) {
+    throw new FirebaseAuthVerificationError('Google account email is not verified.', 401, 'GOOGLE_EMAIL_UNVERIFIED');
+  }
+  return { uid: decoded.uid, email: decoded.email.trim().toLowerCase(), name: decoded.name };
+}

@@ -49,6 +49,17 @@ import {
   getPhoneLookupVariants,
   FirebaseAuthVerificationError,
 } from './src/server/firebaseAdmin.js';
+import {
+  verifyFirebaseGoogleIdToken,
+  normalizeCanonicalPhone as normalizePhoneCanon,
+} from './src/server/firebaseAdmin.js';
+import {
+  configureEmailOtpStore,
+  requestEmailOtp,
+  verifyEmailOtp,
+  normalizeEmail,
+  isValidEmail,
+} from './src/server/emailOtp.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -907,6 +918,323 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
+// ─── FREE EMAIL + GOOGLE REGISTRATION (no paid SMS) ──────────────────────────
+configureEmailOtpStore(isNeonConfigured ? pool : null);
+
+const emailOtpSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  handler: (_req, res) => {
+    res.status(429).json({
+      success: false,
+      error: 'Too many OTP requests. Please try again later.',
+      code: 'EMAIL_OTP_RATE_LIMIT',
+    });
+  },
+});
+app.use('/api/auth/send-email-otp', emailOtpSendLimiter);
+app.use('/api/auth/verify-email-otp', authLimiter);
+app.use('/api/auth/google-register-login', authLimiter);
+
+function validateEmailRegistrationBody(body: any):
+  | { ok: false; error: string }
+  | { ok: true; role: string; name: string; phone: string; phoneVariants: string[]; password: string } {
+  const allowedRoles = ['farmer', 'wholesaler', 'retailer', 'consumer'];
+  const role = String(body?.role || '').toLowerCase();
+  if (!allowedRoles.includes(role)) {
+    return { ok: false, error: `Invalid role. Public registration permitted only for: ${allowedRoles.join(', ')}` };
+  }
+  const name = String(body?.name || '').trim();
+  if (!name) return { ok: false, error: 'Name is required.' };
+  const password = String(body?.password || '');
+  if (password.length < 6) return { ok: false, error: 'Password must be at least 6 characters long.' };
+  const phone = normalizePhoneCanon(String(body?.phone || ''));
+  if (!/^01[3-9]\d{8}$/.test(phone)) {
+    return { ok: false, error: 'A valid 11-digit Bangladeshi mobile number is required.' };
+  }
+  if (role === 'wholesaler' && !String(body?.businessName || '').trim()) {
+    return { ok: false, error: 'Business / arat name is required for wholesalers.' };
+  }
+  if (role === 'retailer' && !String(body?.shopName || '').trim()) {
+    return { ok: false, error: 'Shop name is required for retailers.' };
+  }
+  if (!String(body?.district || '').trim()) return { ok: false, error: 'District is required.' };
+  return { ok: true, role, name, phone, phoneVariants: getPhoneLookupVariants(phone), password };
+}
+
+function userRowToSafeUser(user: any, rawToken: string, nowIso: string) {
+  let primaryCropsParsed: any = undefined;
+  try {
+    if (user.primary_crops) {
+      primaryCropsParsed = typeof user.primary_crops === 'string' ? JSON.parse(user.primary_crops) : user.primary_crops;
+    }
+  } catch {}
+  return {
+    id: user.id,
+    role: user.role,
+    name: user.name,
+    nameBn: user.name_bn || user.nameBn,
+    phone: user.phone,
+    email: user.email,
+    district: user.district,
+    upazila: user.upazila,
+    verified: true,
+    isVerified: true,
+    firebaseUid: user.firebase_uid || user.firebaseUid,
+    farmSizeAcres: user.farm_size_acres || user.farmSizeAcres,
+    primaryCrops: primaryCropsParsed,
+    businessName: user.business_name || user.businessName,
+    businessType: user.business_type || user.businessType,
+    shopName: user.shop_name || user.shopName,
+    licenseNumber: user.license_number || user.licenseNumber,
+    tradeAddress: user.trade_address || user.tradeAddress,
+    deliveryAddress: user.delivery_address || user.deliveryAddress,
+    createdAt: user.created_at || user.createdAt,
+    lastLoginAt: nowIso,
+    sessionToken: rawToken,
+  };
+}
+
+async function findUserByEmailAny(email: string): Promise<any | null> {
+  if (isNeonConfigured) {
+    try {
+      const r = await pool.query('SELECT * FROM users WHERE lower(email) = $1 LIMIT 1', [email]);
+      if (r.rows.length > 0) return r.rows[0];
+    } catch (e) {
+      console.warn('[Neon] email lookup error:', e);
+    }
+  }
+  try {
+    return (db.prepare('SELECT * FROM users WHERE lower(email) = ? LIMIT 1').get(email) as any) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function findUserByPhonesAny(variants: string[]): Promise<any | null> {
+  if (isNeonConfigured) {
+    try {
+      const r = await pool.query('SELECT * FROM users WHERE phone = ANY($1::text[]) LIMIT 1', [variants]);
+      if (r.rows.length > 0) return r.rows[0];
+    } catch (e) {
+      console.warn('[Neon] phone lookup error:', e);
+    }
+  }
+  try {
+    const ph = variants.map(() => '?').join(',');
+    return (db.prepare(`SELECT * FROM users WHERE phone IN (${ph}) LIMIT 1`).get(...variants) as any) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Shared completion step for Google / Email-OTP registration.
+ * The email has ALREADY been proven (Firebase Google token or email OTP).
+ */
+async function completeEmailVerifiedAuth(
+  req: express.Request,
+  res: express.Response,
+  opts: { email: string; provider: 'google' | 'email-otp'; firebaseUid: string | null; body: any; v: any }
+) {
+  const { email, provider, firebaseUid, body, v } = opts;
+  const nowIso = new Date().toISOString();
+
+  // Existing account for this verified email -> sign in (no duplicates), mark verified
+  const existingByEmail = await findUserByEmailAny(email);
+  if (existingByEmail) {
+    try {
+      if (isNeonConfigured) {
+        await pool.query(
+          'UPDATE users SET is_verified = true, verified = true, firebase_uid = COALESCE(firebase_uid, $2), last_login_at = $3 WHERE id = $1',
+          [existingByEmail.id, firebaseUid, nowIso]
+        );
+      }
+    } catch {}
+    try {
+      db.prepare('UPDATE users SET is_verified = 1, verified = 1, last_login_at = ? WHERE id = ?').run(nowIso, existingByEmail.id);
+    } catch {}
+    const { rawToken } = await createSession(existingByEmail.id, existingByEmail.role, req);
+    res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
+    try {
+      jsonDb.updateUser(existingByEmail.id, { sessionToken: rawToken, lastLoginAt: nowIso });
+    } catch {}
+    return res.json({
+      success: true,
+      existing: true,
+      message: 'An account with this email already exists. You have been signed in.',
+      token: rawToken,
+      user: userRowToSafeUser(existingByEmail, rawToken, nowIso),
+    });
+  }
+
+  const existingByPhone = await findUserByPhonesAny(v.phoneVariants);
+  if (existingByPhone) {
+    return res.status(409).json({
+      error: 'Account with this number already exists',
+      code: 'PHONE_ALREADY_EXISTS',
+    });
+  }
+
+  const district = String(body.district || 'Bogura');
+  const upazila = body.upazila ? String(body.upazila) : null;
+  const businessName = body.businessName ? String(body.businessName) : null;
+  const businessType = body.businessType ? String(body.businessType) : null;
+  const shopName = body.shopName ? String(body.shopName) : null;
+  const tradeAddress = body.tradeAddress ? String(body.tradeAddress) : null;
+  const deliveryAddress = body.deliveryAddress ? String(body.deliveryAddress) : null;
+  const userId = `usr-${v.role}-${Date.now()}`;
+  const passwordHash = await hashPassword(v.password);
+
+  if (isNeonConfigured) {
+    try {
+      await pool.query(
+        `INSERT INTO users (
+           id, role, name, phone, email, password_hash, password_algo, district, upazila,
+           verified, is_verified, firebase_uid, business_name, business_type, shop_name,
+           trade_address, delivery_address, created_at, last_login_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,'bcrypt',$7,$8,true,true,$9,$10,$11,$12,$13,$14,$15,$15)`,
+        [userId, v.role, v.name, v.phone, email, passwordHash, district, upazila, firebaseUid,
+          businessName, businessType, shopName, tradeAddress, deliveryAddress, nowIso]
+      );
+    } catch (e: any) {
+      if (e?.code === '23505') {
+        return res.status(409).json({ error: 'Account with this number already exists', code: 'PHONE_ALREADY_EXISTS' });
+      }
+      console.error('[Neon] email-verified user insert failed:', e?.message || e);
+      return res.status(500).json({ error: 'Failed to create user account in cloud database.' });
+    }
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO users (
+        id, role, name, phone, email, password_hash, district, upazila,
+        verified, is_verified, firebase_uid, business_name, business_type, shop_name,
+        trade_address, created_at, last_login_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)
+    `).run(userId, v.role, v.name, v.phone, email, passwordHash, district, upazila, firebaseUid,
+      businessName, businessType, shopName, tradeAddress, nowIso, nowIso);
+  } catch (sqliteErr: any) {
+    if (!isNeonConfigured) {
+      if (String(sqliteErr?.code || '').includes('SQLITE_CONSTRAINT')) {
+        return res.status(409).json({ error: 'Account with this number already exists', code: 'PHONE_ALREADY_EXISTS' });
+      }
+      throw sqliteErr;
+    }
+    console.warn('[Sync] SQLite user mirror notice:', sqliteErr?.message || sqliteErr);
+  }
+
+  const { rawToken } = await createSession(userId, v.role, req);
+  res.cookie(SESSION_COOKIE_NAME, rawToken, SESSION_COOKIE_OPTIONS);
+
+  try {
+    jsonDb.addUser({
+      id: userId,
+      role: v.role as any,
+      name: v.name,
+      phone: v.phone,
+      email,
+      passwordHash,
+      district,
+      upazila: upazila || undefined,
+      verified: true,
+      createdAt: nowIso,
+      businessName: businessName || undefined,
+      businessType: businessType || undefined,
+      shopName: shopName || undefined,
+      sessionToken: rawToken,
+    });
+  } catch (syncErr) {
+    console.warn('[Sync] jsonDb user sync warning on email register:', syncErr);
+  }
+
+  console.log(`[Auth] ${provider} registration complete for ${email} (${userId})`);
+  return res.status(201).json({
+    success: true,
+    message: 'Registration successful!',
+    token: rawToken,
+    user: {
+      id: userId, role: v.role, name: v.name, phone: v.phone, email, district,
+      upazila: upazila || undefined, verified: true, isVerified: true,
+      firebaseUid: firebaseUid || undefined,
+      businessName: businessName || undefined, businessType: businessType || undefined,
+      shopName: shopName || undefined, tradeAddress: tradeAddress || undefined,
+      deliveryAddress: deliveryAddress || undefined,
+      createdAt: nowIso, sessionToken: rawToken,
+    },
+  });
+}
+
+// Option A: Google (Firebase) sign-in -> register or log in
+app.post('/api/auth/google-register-login', async (req, res) => {
+  try {
+    const v = validateEmailRegistrationBody(req.body);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    let google;
+    try {
+      google = await verifyFirebaseGoogleIdToken(req.body?.idToken);
+    } catch (err: any) {
+      const status = err instanceof FirebaseAuthVerificationError ? err.statusCode : 401;
+      const code = err instanceof FirebaseAuthVerificationError ? err.code : 'INVALID_GOOGLE_TOKEN';
+      return res.status(status).json({ error: err?.message || 'Google verification failed.', code });
+    }
+    return await completeEmailVerifiedAuth(req, res, {
+      email: google.email, provider: 'google', firebaseUid: google.uid, body: req.body, v,
+    });
+  } catch (err: any) {
+    console.error('google-register-login error:', err);
+    return res.status(500).json({ error: err?.message || 'Google registration failed.' });
+  }
+});
+
+// Option B step 1: send 6-digit OTP to any email (free SMTP / Resend)
+app.post('/api/auth/send-email-otp', async (req, res) => {
+  try {
+    const result = await requestEmailOtp(req.body?.email);
+    if (!result.ok) {
+      return res.status(result.status).json({
+        success: false, error: result.error, code: result.code, cooldownSeconds: result.cooldownSeconds,
+      });
+    }
+    return res.json({
+      success: true,
+      message: 'A 6-digit verification code has been sent to your email.',
+      cooldownSeconds: result.cooldownSeconds,
+      expiresInSeconds: result.expiresInSeconds,
+    });
+  } catch (err: any) {
+    console.error('send-email-otp error:', err);
+    return res.status(500).json({ error: 'Failed to send verification email.' });
+  }
+});
+
+// Option B step 2: verify OTP, then register or log in
+app.post('/api/auth/verify-email-otp', async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    if (!isValidEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+
+    const v = validateEmailRegistrationBody(req.body);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    const otpResult = await verifyEmailOtp(email, req.body?.otp);
+    if (!otpResult.ok) {
+      return res.status(otpResult.status).json({ error: otpResult.error, code: otpResult.code });
+    }
+    return await completeEmailVerifiedAuth(req, res, {
+      email, provider: 'email-otp', firebaseUid: null, body: req.body, v,
+    });
+  } catch (err: any) {
+    console.error('verify-email-otp error:', err);
+    return res.status(500).json({ error: err?.message || 'Email verification failed.' });
+  }
+});
+
 // Login for registered users (Strictly rejects unverified accounts where is_verified === false)
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -989,7 +1317,7 @@ app.post('/api/auth/login', async (req, res) => {
         } catch {}
       }
       return res.status(403).json({
-        error: 'Your phone number is not verified. Only OTP-verified accounts are permitted to log in.',
+        error: 'Your account is not verified. Only email/Google-verified accounts are permitted to log in.',
         code: 'ACCOUNT_NOT_VERIFIED',
       });
     }

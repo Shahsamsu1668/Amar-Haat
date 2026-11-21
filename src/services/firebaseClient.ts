@@ -10,6 +10,8 @@ import {
   getAuth,
   RecaptchaVerifier,
   signInWithPhoneNumber,
+  GoogleAuthProvider,
+  signInWithPopup,
   type Auth,
   type ConfirmationResult,
 } from 'firebase/auth';
@@ -170,3 +172,35 @@ export function mapFirebaseAuthError(err: any, language: 'en' | 'bn'): string {
 }
 
 export type { ConfirmationResult, RecaptchaVerifier };
+
+
+/**
+ * Google sign-in via Firebase popup. Returns the Firebase ID token (verified server-side)
+ * plus the Google email / UID. Always shows the account chooser.
+ */
+export async function signInWithGoogle(): Promise<{ idToken: string; email: string; uid: string }> {
+  const auth = getFirebaseAuth();
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const cred = await signInWithPopup(auth, provider);
+  const idToken = await cred.user.getIdToken(true);
+  return { idToken, email: cred.user.email || '', uid: cred.user.uid };
+}
+
+/** Maps Google popup errors to friendly English/Bangla text (falls back to mapFirebaseAuthError). */
+export function mapGoogleAuthError(err: any, language: 'en' | 'bn'): string {
+  const bn = language === 'bn';
+  switch (String(err?.code || '')) {
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return bn ? 'গুগল সাইন-ইন বাতিল করা হয়েছে।' : 'Google sign-in was cancelled.';
+    case 'auth/popup-blocked':
+      return bn ? 'ব্রাউজার পপআপ ব্লক করেছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।' : 'Popup was blocked by the browser. Allow popups and try again.';
+    case 'auth/unauthorized-domain':
+      return bn ? 'এই ডোমেইন Firebase-এ অনুমোদিত নয়।' : 'This domain is not authorized in Firebase Authentication settings.';
+    case 'auth/operation-not-allowed':
+      return bn ? 'Firebase-এ Google সাইন-ইন চালু নেই।' : 'Google sign-in is not enabled in Firebase Console.';
+    default:
+      return mapFirebaseAuthError(err, language);
+  }
+}
