@@ -97,6 +97,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [emailInput, setEmailInput] = useState('');
   const [emailOtpCode, setEmailOtpCode] = useState('');
   const [emailOtpInfo, setEmailOtpInfo] = useState('');
+  const [sendingOtp, setSendingOtp] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
 
   const [error, setError] = useState('');
@@ -363,8 +364,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
   };
 
-  // Option B step 1: send OTP to typed email
-  const handleSendEmailOtp = async (e?: React.FormEvent) => {
+  // Option B step 1: instant optimistic transition to OTP view while dispatching in background
+  const handleSendEmailOtp = (e?: React.FormEvent) => {
     e?.preventDefault();
     setError('');
     setIsConflictError(false);
@@ -379,21 +380,24 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       setError(t('Please enter a valid email address.', 'সঠিক ইমেইল ঠিকানা লিখুন।'));
       return;
     }
-    setLoading(true);
-    try {
-      const res = await authApi.sendEmailOtp(email);
-      setEmailInput(email);
-      setEmailOtpCode('');
-      setResendCooldown(res.cooldownSeconds ?? 60);
-      setEmailOtpInfo(
-        t(`A 6-digit code was sent to ${email}.`, `${email} ঠিকানায় ৬ সংখ্যার কোড পাঠানো হয়েছে।`)
-      );
-      setRegStep(3);
-    } catch (err: any) {
-      setError(err?.message || t('Could not send the code.', 'কোড পাঠানো যায়নি।'));
-    } finally {
-      setLoading(false);
-    }
+    setEmailInput(email);
+    setEmailOtpCode('');
+    setSendingOtp(true);
+    setRegStep(3);
+
+    void authApi
+      .sendEmailOtp(email)
+      .then((res) => {
+        setResendCooldown(res.cooldownSeconds ?? 60);
+        setEmailOtpInfo(t(`Code sent to ${email}.`, 'কোড পাঠানো হয়েছে'));
+      })
+      .catch((err: any) => {
+        setResendCooldown(0);
+        setError(err?.message || t('Could not send the code.', 'কোড পাঠানো যায়নি।'));
+      })
+      .finally(() => {
+        setSendingOtp(false);
+      });
   };
 
   // Option B step 2: verify OTP and register / log in
@@ -1072,12 +1076,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </button>
                 </div>
 
-                {emailOtpInfo && (
+                {sendingOtp ? (
+                  <div className="text-xs font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                    <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                    <span>{t('Sending code...', 'কোড পাঠানো হচ্ছে...')}</span>
+                  </div>
+                ) : emailOtpInfo ? (
                   <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <span>{emailOtpInfo}</span>
                   </div>
-                )}
+                ) : null}
 
                 <div>
                   <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1.5">
@@ -1106,15 +1115,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <button
                     type="button"
                     data-testid="resend-otp-btn"
-                    disabled={loading || resendCooldown > 0}
+                    disabled={loading || sendingOtp || resendCooldown > 0}
                     onClick={() => handleSendEmailOtp()}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed bg-white dark:bg-stone-800 border-stone-300 dark:border-stone-600 text-emerald-700 dark:text-emerald-300"
                   >
-                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading || sendingOtp ? 'animate-spin' : ''}`} />
                     <span>
-                      {resendCooldown > 0
-                        ? t(`Resend (${resendCooldown}s)`, `পুনরায় পাঠান (${resendCooldown}s)`)
-                        : t('Resend code', 'পুনরায় কোড পাঠান')}
+                      {sendingOtp
+                        ? t('Sending...', 'পাঠানো হচ্ছে...')
+                        : resendCooldown > 0
+                          ? t(`Resend (${resendCooldown}s)`, `পুনরায় পাঠান (${resendCooldown}s)`)
+                          : t('Resend code', 'পুনরায় কোড পাঠান')}
                     </span>
                   </button>
                 </div>

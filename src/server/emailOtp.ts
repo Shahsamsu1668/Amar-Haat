@@ -5,7 +5,7 @@
  * - 10 minute expiry, max 5 verification attempts, 60s resend cooldown,
  *   max 5 sends per email per hour
  * - Storage: Neon PostgreSQL table `email_otps` when configured, otherwise in-memory
- * - Delivery: Resend (RESEND_API_KEY) -> SMTP via Nodemailer (SMTP_*) -> dev console log
+ * - Delivery: Brevo HTTP API (BREVO_API_KEY) -> Resend (RESEND_API_KEY) -> SMTP via Nodemailer (SMTP_*) -> dev console log
  */
 
 import crypto from 'crypto';
@@ -40,6 +40,7 @@ export interface OtpResult {
 const memStore = new Map<string, OtpRecord>();
 let neonPool: Pool | null = null;
 let tableReady = false;
+let tableInitPromise: Promise<void> | null = null;
 
 export function configureEmailOtpStore(pool: Pool | null): void {
   neonPool = pool;
@@ -68,18 +69,27 @@ function hashOtp(email: string, otp: string): string {
 
 async function ensureTable(): Promise<void> {
   if (!neonPool || tableReady) return;
-  await neonPool.query(`
-    CREATE TABLE IF NOT EXISTS email_otps (
-      email TEXT PRIMARY KEY,
-      otp_hash TEXT NOT NULL,
-      expires_at BIGINT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_sent_at BIGINT NOT NULL,
-      send_count INTEGER NOT NULL DEFAULT 1,
-      window_start BIGINT NOT NULL
-    )
-  `);
-  tableReady = true;
+  if (!tableInitPromise) {
+    tableInitPromise = neonPool
+      .query(`
+        CREATE TABLE IF NOT EXISTS email_otps (
+          email TEXT PRIMARY KEY,
+          otp_hash TEXT NOT NULL,
+          expires_at BIGINT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_sent_at BIGINT NOT NULL,
+          send_count INTEGER NOT NULL DEFAULT 1,
+          window_start BIGINT NOT NULL
+        )
+      `)
+      .then(() => {
+        tableReady = true;
+      })
+      .finally(() => {
+        tableInitPromise = null;
+      });
+  }
+  await tableInitPromise;
 }
 
 async function getRecord(email: string): Promise<OtpRecord | null> {
@@ -134,6 +144,19 @@ async function deleteRecord(email: string): Promise<void> {
   }
 }
 
+function parseSender(rawFrom?: string): { name: string; email: string } {
+  const raw = (rawFrom || '').trim();
+  const match = raw.match(/^"?([^"<]+?)"?\s*<([^>]+)>$/);
+  if (match && match[2].includes('@')) {
+    return { name: match[1].trim() || 'Amar Haat', email: match[2].trim() };
+  }
+  if (raw.includes('@')) {
+    return { name: 'Amar Haat', email: raw };
+  }
+  const fallbackEmail = process.env.SMTP_USER?.trim() || 'no-reply@amarhaat.local';
+  return { name: 'Amar Haat', email: fallbackEmail };
+}
+
 async function deliverOtpEmail(email: string, otp: string): Promise<{ ok: boolean; error?: string }> {
   const subject = 'আমার হাট (Amar Haat) – আপনার OTP কোড / Your verification code';
   const text =
@@ -148,6 +171,40 @@ async function deliverOtpEmail(email: string, otp: string): Promise<{ ok: boolea
     `<p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#065f46">${otp}</p>` +
     `<p style="color:#555;font-size:13px">কোডটি ১০ মিনিট বৈধ। এই কোড কাউকে বলবেন না।<br/>Valid for 10 minutes. Never share this code.</p></div>`;
 
+  // 1. Brevo HTTP API (fast <1s HTTPS delivery on Render, no SMTP port blocking)
+  const brevoKey = process.env.BREVO_API_KEY?.trim();
+  if (brevoKey) {
+    try {
+      const sender = parseSender(process.env.BREVO_FROM || process.env.SMTP_FROM || process.env.SMTP_USER);
+      const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoKey,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          sender,
+          to: [{ email }],
+          subject,
+          htmlContent: html,
+          textContent: text,
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        console.error('[EmailOTP] Brevo rejected request:', resp.status, body.slice(0, 250));
+        return { ok: false, error: `Brevo email error (${resp.status}): ${body.slice(0, 140) || resp.statusText}` };
+      }
+      return { ok: true };
+    } catch (err: any) {
+      console.error('[EmailOTP] Brevo delivery failed:', err?.message || err);
+      return { ok: false, error: `Brevo delivery failed: ${err?.message || 'network timeout'}` };
+    }
+  }
+
+  // 2. Resend HTTP API
   const resendKey = process.env.RESEND_API_KEY?.trim();
   if (resendKey) {
     try {
@@ -156,31 +213,37 @@ async function deliverOtpEmail(email: string, otp: string): Promise<{ ok: boolea
         method: 'POST',
         headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ from, to: [email], subject, text, html }),
+        signal: AbortSignal.timeout(8000),
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => '');
         console.error('[EmailOTP] Resend rejected request:', resp.status, body.slice(0, 200));
-        return { ok: false, error: 'Email provider rejected the request.' };
+        return { ok: false, error: `Resend email error (${resp.status}): ${body.slice(0, 140) || resp.statusText}` };
       }
       return { ok: true };
     } catch (err: any) {
       console.error('[EmailOTP] Resend delivery failed:', err?.message || err);
-      return { ok: false, error: 'Email delivery failed.' };
+      return { ok: false, error: `Resend delivery failed: ${err?.message || 'network timeout'}` };
     }
   }
 
+  // 3. Nodemailer SMTP fallback (strict 5000ms timeouts + strip spaces from app password)
   const host = process.env.SMTP_HOST?.trim();
   if (host) {
     try {
       const port = Number(process.env.SMTP_PORT || 587);
+      const smtpPass = (process.env.SMTP_PASS || '').replace(/\s+/g, '');
       const transporter = nodemailer.createTransport({
         host,
         port,
         secure: port === 465,
-        auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' } : undefined,
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 5000,
+        auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER.trim(), pass: smtpPass } : undefined,
       });
       await transporter.sendMail({
-        from: process.env.SMTP_FROM?.trim() || process.env.SMTP_USER || 'no-reply@amarhaat.local',
+        from: process.env.SMTP_FROM?.trim() || process.env.SMTP_USER?.trim() || 'no-reply@amarhaat.local',
         to: email,
         subject,
         text,
@@ -189,16 +252,16 @@ async function deliverOtpEmail(email: string, otp: string): Promise<{ ok: boolea
       return { ok: true };
     } catch (err: any) {
       console.error('[EmailOTP] SMTP delivery failed:', err?.message || err);
-      return { ok: false, error: 'Email delivery failed.' };
+      return { ok: false, error: `SMTP delivery failed: ${err?.message || 'connection error'}` };
     }
   }
 
   if (process.env.NODE_ENV === 'production') {
-    console.error('[EmailOTP] No SMTP_HOST / RESEND_API_KEY configured in production.');
+    console.error('[EmailOTP] No BREVO_API_KEY / RESEND_API_KEY / SMTP_HOST configured in production.');
     return { ok: false, error: 'Email service is not configured on the server.' };
   }
   // Safe dev fallback: log only (never returned to the client)
-  console.warn(`[EmailOTP][DEV] SMTP not configured. OTP for ${email}: ${otp}`);
+  console.warn(`[EmailOTP][DEV] Email provider not configured. OTP for ${email}: ${otp}`);
   return { ok: true };
 }
 
