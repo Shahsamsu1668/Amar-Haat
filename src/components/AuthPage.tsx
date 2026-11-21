@@ -746,7 +746,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <div className="p-3 bg-purple-50 dark:bg-purple-950/50 border border-purple-200 dark:border-purple-800/60 rounded-xl text-xs text-purple-900 dark:text-purple-200 font-medium">
                     {t(
                       'Tip: Consumers can also browse and place orders as guests, or create a Google-verified account below.',
-                      'পরামর্শ: ভোক্তারা নিবন্ধন ছাড়াই পণ্য দেখতে পারেন, অথবা OTP যাচাই করে স্থায়ী অ্যাকাউন্ট খুলতে পারেন।'
+                      'পরামর্শ: ভোক্তারা নিবন্ধন ছাড়াই পণ্য দেখতে পারেন, অথবা গুগল যাচাই করে স্থায়ী অ্যাকাউন্ট খুলতে পারেন।'
                     )}
                   </div>
                 )}

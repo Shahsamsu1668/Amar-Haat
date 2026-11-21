@@ -232,35 +232,98 @@ export interface VerifiedGoogleResult {
 /**
  * Verifies a Firebase ID token obtained via Google Sign-In (`signInWithPopup` +
  * `GoogleAuthProvider`) and returns the Google-verified email + Firebase UID.
+ *
+ * Uses `firebase-admin` when service account credentials are present, and falls back
+ * seamlessly to the Firebase Identity Toolkit REST API (`accounts:lookup`) using
+ * `VITE_FIREBASE_API_KEY` / `FIREBASE_API_KEY` so no service account private key is required.
  */
 export async function verifyFirebaseGoogleIdToken(idToken: string): Promise<VerifiedGoogleResult> {
   if (!idToken || typeof idToken !== 'string' || !idToken.trim()) {
     throw new FirebaseAuthVerificationError('Google sign-in token is required.', 401, 'MISSING_GOOGLE_TOKEN');
   }
+  const cleanToken = idToken.trim();
+
   const app = initFirebaseAdmin();
-  if (!app) {
+  if (app) {
+    let decoded: DecodedIdToken;
+    try {
+      decoded = await getAuth(app).verifyIdToken(cleanToken);
+    } catch (err: any) {
+      const expired = String(err?.code || '') === 'auth/id-token-expired';
+      throw new FirebaseAuthVerificationError(
+        expired ? 'Google sign-in session expired. Please try again.' : 'Invalid Google sign-in token.',
+        401,
+        expired ? 'GOOGLE_TOKEN_EXPIRED' : 'INVALID_GOOGLE_TOKEN'
+      );
+    }
+    if (decoded.firebase?.sign_in_provider !== 'google.com') {
+      throw new FirebaseAuthVerificationError('Token was not issued by Google sign-in.', 401, 'NOT_GOOGLE_PROVIDER');
+    }
+    if (!decoded.email || decoded.email_verified !== true) {
+      throw new FirebaseAuthVerificationError('Google account email is not verified.', 401, 'GOOGLE_EMAIL_UNVERIFIED');
+    }
+    return { uid: decoded.uid, email: decoded.email.trim().toLowerCase(), name: decoded.name };
+  }
+
+  // Fallback: Firebase Identity Toolkit REST API lookup (no service account private key required)
+  const apiKey = (process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || '').trim();
+  if (!apiKey) {
     throw new FirebaseAuthVerificationError(
-      'Firebase Admin SDK is not configured on the server. Google sign-in requires Firebase credentials.',
+      'Firebase API key (VITE_FIREBASE_API_KEY or FIREBASE_API_KEY) is not configured on the server.',
       503,
-      'FIREBASE_ADMIN_NOT_CONFIGURED'
+      'FIREBASE_API_KEY_MISSING'
     );
   }
-  let decoded: DecodedIdToken;
+
+  let lookupResp: Response;
+  let lookupData: any;
   try {
-    decoded = await getAuth(app).verifyIdToken(idToken.trim());
+    lookupResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken: cleanToken }),
+      }
+    );
+    lookupData = await lookupResp.json().catch(() => ({}));
   } catch (err: any) {
-    const expired = String(err?.code || '') === 'auth/id-token-expired';
+    throw new FirebaseAuthVerificationError(
+      'Failed to verify Google sign-in token with Firebase.',
+      502,
+      'FIREBASE_LOOKUP_NETWORK_ERROR'
+    );
+  }
+
+  if (!lookupResp.ok) {
+    const errMsg = String(lookupData?.error?.message || '');
+    const expired = errMsg.includes('TOKEN_EXPIRED');
     throw new FirebaseAuthVerificationError(
       expired ? 'Google sign-in session expired. Please try again.' : 'Invalid Google sign-in token.',
       401,
       expired ? 'GOOGLE_TOKEN_EXPIRED' : 'INVALID_GOOGLE_TOKEN'
     );
   }
-  if (decoded.firebase?.sign_in_provider !== 'google.com') {
+
+  const fbUser = Array.isArray(lookupData?.users) ? lookupData.users[0] : null;
+  if (!fbUser || !fbUser.localId) {
+    throw new FirebaseAuthVerificationError('Invalid Google sign-in token.', 401, 'INVALID_GOOGLE_TOKEN');
+  }
+
+  const hasGoogleProvider =
+    Array.isArray(fbUser.providerUserInfo) &&
+    fbUser.providerUserInfo.some((p: any) => p?.providerId === 'google.com');
+  if (!hasGoogleProvider) {
     throw new FirebaseAuthVerificationError('Token was not issued by Google sign-in.', 401, 'NOT_GOOGLE_PROVIDER');
   }
-  if (!decoded.email || decoded.email_verified !== true) {
+
+  if (!fbUser.email || fbUser.emailVerified !== true) {
     throw new FirebaseAuthVerificationError('Google account email is not verified.', 401, 'GOOGLE_EMAIL_UNVERIFIED');
   }
-  return { uid: decoded.uid, email: decoded.email.trim().toLowerCase(), name: decoded.name };
+
+  return {
+    uid: String(fbUser.localId),
+    email: String(fbUser.email).trim().toLowerCase(),
+    name: fbUser.displayName ? String(fbUser.displayName) : undefined,
+  };
 }
