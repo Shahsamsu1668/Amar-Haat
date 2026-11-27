@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Language, User } from '../types';
 import { AuthStore, LoginResult } from '../data/store';
-import { BANGLADESH_LOCATIONS } from '../data/mockData';
+import {
+  getDefaultUpazilaForDistrict,
+  isValidUpazilaForDistrict,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
 import { authApi } from '../services/api';
 import {
   signInWithGoogle,
@@ -130,11 +134,13 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     return () => clearInterval(timer);
   }, [resendCooldown]);
 
-  // Upazilas based on chosen district
-  const selectedLocation = BANGLADESH_LOCATIONS.find(
-    (l) => l.district.toLowerCase() === regDistrict.toLowerCase()
-  );
-  const upazilaList = selectedLocation ? selectedLocation.upazilas : ['Sadar', 'Shibganj', 'Sherpur'];
+  // Dynamically keep regUpazila valid whenever regDistrict changes
+  useEffect(() => {
+    if (!isValidUpazilaForDistrict(regDistrict, regUpazila)) {
+      const def = getDefaultUpazilaForDistrict(regDistrict);
+      if (def) setRegUpazila(def);
+    }
+  }, [regDistrict, regUpazila]);
 
   // Handle Standard Login
   const handleLogin = async (e: React.FormEvent) => {
@@ -260,7 +266,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         'সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX)।'
       );
     }
-    if (!regDistrict || !regUpazila) return t('Select your district and upazila.', 'জেলা ও উপজেলা নির্বাচন করুন।');
+    if (!regDistrict || !regUpazila || !isValidUpazilaForDistrict(regDistrict, regUpazila)) {
+      return t('Select your district and upazila.', 'জেলা ও উপজেলা নির্বাচন করুন।');
+    }
     if (selectedRole === 'wholesaler' && !businessName.trim()) {
       return t('Enter your wholesale business / arat name.', 'আপনার আড়ত বা প্রতিষ্ঠানের নাম লিখুন।');
     }
@@ -797,44 +805,37 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </p>
                 </div>
 
-                {/* District and Upazila */}
-                <div className="grid grid-cols-2 gap-3">
+                {/* District and Upazila (All 64 Districts & 495 Upazilas) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1">
                       {t('District', 'জেলা')} *
                     </label>
-                    <select
+                    <DistrictSelect
                       value={regDistrict}
-                      onChange={(e) => {
-                        setRegDistrict(e.target.value);
-                        const loc = BANGLADESH_LOCATIONS.find((l) => l.district === e.target.value);
-                        if (loc && loc.upazilas.length > 0) setRegUpazila(loc.upazilas[0]);
+                      onChange={(newDist) => {
+                        setRegDistrict(newDist);
+                        const defUpz = getDefaultUpazilaForDistrict(newDist);
+                        if (defUpz) setRegUpazila(defUpz);
                       }}
-                      className="w-full px-3 py-2.5 text-xs font-bold rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-                    >
-                      {BANGLADESH_LOCATIONS.map((loc) => (
-                        <option key={loc.district} value={loc.district} className="bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100">
-                          {language === 'bn' ? loc.districtBn : loc.district}
-                        </option>
-                      ))}
-                    </select>
+                      language={language}
+                      variant="dark-aware"
+                      showIcon
+                    />
                   </div>
 
                   <div>
                     <label className="block text-xs font-bold text-stone-700 dark:text-stone-200 mb-1">
                       {t('Upazila / Area', 'উপজেলা')} *
                     </label>
-                    <select
+                    <UpazilaSelect
+                      district={regDistrict}
                       value={regUpazila}
-                      onChange={(e) => setRegUpazila(e.target.value)}
-                      className="w-full px-3 py-2.5 text-xs font-bold rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-800 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-                    >
-                      {upazilaList.map((u) => (
-                        <option key={u} value={u} className="bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100">
-                          {u}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setRegUpazila}
+                      language={language}
+                      variant="dark-aware"
+                      dropdownAlign="right"
+                    />
                   </div>
                 </div>
 

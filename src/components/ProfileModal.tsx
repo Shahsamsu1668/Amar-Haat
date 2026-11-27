@@ -1,6 +1,14 @@
 import React, { useState } from 'react';
 import { User, Language, UserRole } from '../types';
-import { BANGLADESH_LOCATIONS } from '../data/mockData';
+import {
+  getDefaultUpazilaForDistrict,
+  getDistrictLabel,
+  getUpazilaLabel,
+  getUpazilaNamesByDistrict,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import { apiService } from '../services/apiService';
 import { AuthStore, CropStore, DemandStore, SupplierStore, OrderStore, TradeOrderStore } from '../data/store';
 import {
   X,
@@ -42,8 +50,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [name, setName] = useState(currentUser.name);
   const [email, setEmail] = useState(currentUser.email || '');
   const [phone, setPhone] = useState(currentUser.phone);
-  const [district, setDistrict] = useState(currentUser.district || 'Bogura');
-  const [upazila, setUpazila] = useState(currentUser.upazila || '');
+  const [district, setDistrict] = useState(
+    normalizeBdDistrictName(currentUser.district || 'Bogura')
+  );
+  const [upazila, setUpazila] = useState(
+    currentUser.upazila || getDefaultUpazilaForDistrict(currentUser.district || 'Bogura')
+  );
   const [education, setEducation] = useState(
     currentUser.education || 'B.Sc in Agriculture (BAU, Mymensingh)'
   );
@@ -71,10 +83,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const t = (en: string, bn: string) => (language === 'bn' ? bn : en);
 
   // Available upazilas for current selected district
-  const selectedLocation = BANGLADESH_LOCATIONS.find(
-    (l) => l.district.toLowerCase() === district.toLowerCase()
-  );
-  const upazilas = selectedLocation ? selectedLocation.upazilas : [];
+  const upazilas = getUpazilaNamesByDistrict(district);
 
   // Calculate live user-specific stats
   const roleStats = (() => {
@@ -164,7 +173,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       email,
       phone,
       district,
-      upazila: upazila || (upazilas[0] || 'Bogura Sadar'),
+      upazila: upazila || (upazilas[0] || getDefaultUpazilaForDistrict(district)),
       education,
       farmSizeAcres: currentUser.role === 'farmer' ? farmSizeAcres : undefined,
       businessName: currentUser.role === 'wholesaler' ? businessName : undefined,
@@ -172,17 +181,22 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       licenseNumber: currentUser.role === 'retailer' ? licenseNumber : undefined,
     };
 
+    try {
+      await apiService.updateProfile(updates);
+    } catch {
+      // Offline / local fallback handled below
+    }
     const updated = AuthStore.updateProfile(updates);
     setSaving(false);
 
-    if (updated) {
-      onUpdateUser(updated);
-      setSaveSuccess(true);
-      setTimeout(() => {
-        setSaveSuccess(false);
-        setIsEditing(false);
-      }, 1200);
-    }
+    const mergedUser = updated || { ...currentUser, ...updates };
+    AuthStore.setCurrentUser(mergedUser);
+    onUpdateUser(mergedUser);
+    setSaveSuccess(true);
+    setTimeout(() => {
+      setSaveSuccess(false);
+      setIsEditing(false);
+    }, 1200);
   };
 
   const roleBadgeInfo: Record<
@@ -258,8 +272,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <span>•</span>
                 <span className="flex items-center gap-1">
                   <MapPin className="w-3 h-3" />
-                  {currentUser.upazila ? `${currentUser.upazila}, ` : ''}
-                  {currentUser.district}
+                  {currentUser.upazila
+                    ? `${getUpazilaLabel(currentUser.district, currentUser.upazila, language)}, `
+                    : ''}
+                  {getDistrictLabel(currentUser.district, language)}
                 </span>
               </div>
             </div>
@@ -411,28 +427,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   {t('District', 'জেলা')}
                 </label>
                 {isEditing ? (
-                  <select
+                  <DistrictSelect
                     value={district}
-                    onChange={(e) => {
-                      setDistrict(e.target.value);
-                      const loc = BANGLADESH_LOCATIONS.find(
-                        (l) => l.district.toLowerCase() === e.target.value.toLowerCase()
-                      );
-                      if (loc && loc.upazilas.length > 0) {
-                        setUpazila(loc.upazilas[0]);
-                      }
+                    onChange={(newDist) => {
+                      setDistrict(newDist);
+                      const defUpz = getDefaultUpazilaForDistrict(newDist);
+                      if (defUpz) setUpazila(defUpz);
                     }}
-                    className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-xl font-medium focus:outline-emerald-600"
-                  >
-                    {BANGLADESH_LOCATIONS.map((loc) => (
-                      <option key={loc.district} value={loc.district}>
-                        {loc.district} ({loc.districtBn})
-                      </option>
-                    ))}
-                  </select>
+                    language={language}
+                    showIcon
+                  />
                 ) : (
                   <p className="p-2.5 bg-stone-50 rounded-xl font-bold text-stone-800">
-                    {currentUser.district}
+                    {getDistrictLabel(currentUser.district, language)}
                   </p>
                 )}
               </div>
@@ -443,20 +450,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   {t('Upazila / Area', 'উপজেলা / এলাকা')}
                 </label>
                 {isEditing ? (
-                  <select
+                  <UpazilaSelect
+                    district={district}
                     value={upazila}
-                    onChange={(e) => setUpazila(e.target.value)}
-                    className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-xl font-medium focus:outline-emerald-600"
-                  >
-                    {upazilas.map((u) => (
-                      <option key={u} value={u}>
-                        {u}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setUpazila}
+                    language={language}
+                    preserveLegacyValue
+                    dropdownAlign="right"
+                  />
                 ) : (
                   <p className="p-2.5 bg-stone-50 rounded-xl font-medium text-stone-800">
-                    {currentUser.upazila || t('Not specified', 'উল্লেখ নেই')}
+                    {currentUser.upazila
+                      ? getUpazilaLabel(currentUser.district, currentUser.upazila, language)
+                      : t('Not specified', 'উল্লেখ নেই')}
                   </p>
                 )}
               </div>

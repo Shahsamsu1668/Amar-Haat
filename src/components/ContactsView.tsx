@@ -3,7 +3,8 @@ import { User, Language, UserRole, UserConnection, DirectMessage, CallLog } from
 import { ConnectionStore, MessageStore, CallStore, AuthStore, NotificationStore, isDemoAccount } from '../data/store';
 import { toBanglaNumber } from './Header';
 import { apiService } from '../services/apiService';
-import { BANGLADESH_LOCATIONS } from '../data/mockData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import { getDistrictLabel, getUpazilaLabel, normalizeBdDistrictName } from '../utils/bdGeoData';
 import {
   Users,
   MessageSquare,
@@ -123,6 +124,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
   const [appliedSearch, setAppliedSearch] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState<UserRole | 'all'>('all');
   const [selectedDistrictFilter, setSelectedDistrictFilter] = useState<string>('all');
+  const [selectedUpazilaFilter, setSelectedUpazilaFilter] = useState<string>('all');
   const [directoryUsers, setDirectoryUsers] = useState<User[]>([]);
   const [directoryLoading, setDirectoryLoading] = useState(false);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
@@ -231,7 +233,22 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         if (selectedRoleFilter !== 'all' && u.role !== selectedRoleFilter) return false;
 
         // District filter
-        if (selectedDistrictFilter !== 'all' && u.district && u.district.toLowerCase() !== selectedDistrictFilter.toLowerCase()) {
+        if (
+          selectedDistrictFilter !== 'all' &&
+          u.district &&
+          normalizeBdDistrictName(u.district).toLowerCase() !==
+            normalizeBdDistrictName(selectedDistrictFilter).toLowerCase()
+        ) {
+          return false;
+        }
+
+        // Upazila filter
+        if (
+          selectedDistrictFilter !== 'all' &&
+          selectedUpazilaFilter !== 'all' &&
+          (u as any).upazila &&
+          String((u as any).upazila).toLowerCase() !== selectedUpazilaFilter.toLowerCase()
+        ) {
           return false;
         }
 
@@ -259,10 +276,10 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
     } finally {
       setDirectoryLoading(false);
     }
-  }, [currentUser.id, currentUser.role, selectedRoleFilter, selectedDistrictFilter, appliedSearch, isUserAuthorizedForViewer]);
+  }, [currentUser.id, currentUser.role, selectedRoleFilter, selectedDistrictFilter, selectedUpazilaFilter, appliedSearch, isUserAuthorizedForViewer]);
 
   // Re-fetch on filter change
-  useEffect(() => { fetchDirectory(appliedSearch); }, [selectedRoleFilter, selectedDistrictFilter]);
+  useEffect(() => { fetchDirectory(appliedSearch); }, [selectedRoleFilter, selectedDistrictFilter, selectedUpazilaFilter]);
 
   // ── Local store data ──────────────────────────────────────────────────
   const refreshLocalData = useCallback(() => {
@@ -557,7 +574,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleSearch(); };
   const handleResetFilters = () => {
     setSearchInput(''); setAppliedSearch('');
-    setSelectedRoleFilter('all'); setSelectedDistrictFilter('all');
+    setSelectedRoleFilter('all'); setSelectedDistrictFilter('all'); setSelectedUpazilaFilter('all');
     fetchDirectory('');
   };
 
@@ -861,21 +878,38 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                 </button>
               </div>
 
-              {/* District Filter */}
-              <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs">
-                <MapPin className="w-3.5 h-3.5 text-stone-500 shrink-0" />
-                <select
-                  value={selectedDistrictFilter}
-                  onChange={(e) => setSelectedDistrictFilter(e.target.value)}
-                  className="bg-transparent font-semibold text-stone-700 focus:outline-none cursor-pointer"
-                >
-                  <option value="all">{t('All Districts (সকল জেলা)', 'সকল জেলা')}</option>
-                  {BANGLADESH_LOCATIONS.map((loc) => (
-                    <option key={loc.district} value={loc.district}>
-                      {loc.district} ({loc.districtBn})
-                    </option>
-                  ))}
-                </select>
+              {/* District & Dynamic Upazila Filter (All 64 Districts) */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="w-48 sm:w-52">
+                  <DistrictSelect
+                    value={selectedDistrictFilter}
+                    onChange={(val) => {
+                      setSelectedDistrictFilter(val);
+                      setSelectedUpazilaFilter('all');
+                    }}
+                    language={language}
+                    includeAll
+                    allValue="all"
+                    allLabelEn="All Districts (64)"
+                    allLabelBn="সকল জেলা (৬৪টি)"
+                    showIcon
+                  />
+                </div>
+                {selectedDistrictFilter !== 'all' && (
+                  <div className="w-44 sm:w-48">
+                    <UpazilaSelect
+                      district={selectedDistrictFilter}
+                      value={selectedUpazilaFilter}
+                      onChange={setSelectedUpazilaFilter}
+                      language={language}
+                      includeAll
+                      allValue="all"
+                      allLabelEn="All Upazilas"
+                      allLabelBn="সকল উপজেলা"
+                      dropdownAlign="right"
+                    />
+                  </div>
+                )}
               </div>
             </div>
 

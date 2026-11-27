@@ -55,6 +55,13 @@ import {
 } from 'lucide-react';
 import { requestMarketPrediction, MarketPredictionResult } from '../services/aiService';
 import { toBanglaNumber, toBanglaDistrict } from './Header';
+import {
+  findBdDistrict,
+  getDefaultUpazilaForDistrict,
+  isValidUpazilaForDistrict,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
 import { DispatchDriverModal } from './DispatchDriverModal';
 import { LiveTrackingModal } from './LiveTrackingModal';
 import {
@@ -207,6 +214,14 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
   const [organicCertified, setOrganicCertified] = useState(false);
   const [variety, setVariety] = useState('দেশি উন্নত জাত');
   const [description, setDescription] = useState('সরাসরি চাষির নিজস্ব খামার থেকে সংগৃহীত তাজা পণ্য।');
+  const [harvestDistrict, setHarvestDistrict] = useState(() =>
+    normalizeBdDistrictName(currentUser.district || 'Bogura')
+  );
+  const [harvestUpazila, setHarvestUpazila] = useState(() =>
+    isValidUpazilaForDistrict(currentUser.district, currentUser.upazila)
+      ? currentUser.upazila!
+      : getDefaultUpazilaForDistrict(currentUser.district || 'Bogura')
+  );
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -265,16 +280,10 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
       setOfficialSource(data.officialSource || 'Department of Agricultural Marketing (DAM)');
       setLastRefreshedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
-      // Fetch Live Meteorological Weather from Open-Meteo
+      // Fetch Live Meteorological Weather from Open-Meteo across all 64 Bangladesh districts
       try {
-        const coords: Record<string, { lat: number; lon: number }> = {
-          Bogura: { lat: 24.8465, lon: 89.3777 },
-          Dhaka: { lat: 23.8103, lon: 90.4125 },
-          Rajshahi: { lat: 24.3636, lon: 88.6241 },
-          Rangpur: { lat: 25.7439, lon: 89.2752 },
-          Dinajpur: { lat: 25.6217, lon: 88.6355 },
-        };
-        const c = coords[selectedDistrict] || coords['Bogura'];
+        const geo = findBdDistrict(selectedDistrict) || findBdDistrict('Bogura')!;
+        const c = { lat: geo.lat, lon: geo.lon };
         const wRes = await fetch(
           `https://api.open-meteo.com/v1/forecast?latitude=${c.lat}&longitude=${c.lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto`
         );
@@ -509,8 +518,11 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
         minOrderQty: selectedUnit === 'dozen' ? 1 : Math.min(20, currentQty),
         pricePerKg: currentPrice,
         unitPrice: currentPrice,
-        district: currentUser.district || selectedDistrict,
-        upazila: currentUser.upazila || 'Shibganj',
+        district: harvestDistrict || currentUser.district || selectedDistrict,
+        upazila:
+          harvestUpazila ||
+          currentUser.upazila ||
+          getDefaultUpazilaForDistrict(harvestDistrict || currentUser.district || selectedDistrict),
         imageUrl: cropImg,
       });
 
@@ -1229,6 +1241,37 @@ export const FarmerDashboard: React.FC<FarmerDashboardProps> = ({
                       onChange={(e) => setVariety(e.target.value)}
                       placeholder={t('e.g. Diamond, Hybrid-3...', 'যেমন: ডায়মন্ড, হাইব্রিড...')}
                       className="w-full px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-xl text-xs sm:text-sm font-medium focus:outline-hidden focus:border-emerald-600 focus:bg-white transition"
+                    />
+                  </div>
+                </div>
+
+                {/* Farm District & Dynamic Upazila (All 64 Districts & 495 Upazilas) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="block text-xs font-bold text-stone-700">
+                      {t('Farm District', 'খামারের জেলা')} *
+                    </label>
+                    <DistrictSelect
+                      value={harvestDistrict}
+                      onChange={(newDist) => {
+                        setHarvestDistrict(newDist);
+                        const defUpz = getDefaultUpazilaForDistrict(newDist);
+                        if (defUpz) setHarvestUpazila(defUpz);
+                      }}
+                      language={language}
+                      showIcon
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs font-bold text-stone-700">
+                      {t('Upazila / Haat Area', 'উপজেলা / হাট এলাকা')} *
+                    </label>
+                    <UpazilaSelect
+                      district={harvestDistrict}
+                      value={harvestUpazila}
+                      onChange={setHarvestUpazila}
+                      language={language}
+                      dropdownAlign="right"
                     />
                   </div>
                 </div>

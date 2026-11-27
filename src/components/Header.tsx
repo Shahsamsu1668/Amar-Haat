@@ -8,6 +8,8 @@ import {
   Users, MessageSquare,
 } from 'lucide-react';
 import { NotificationStore, MessageStore, AuthStore } from '../data/store';
+import { toBanglaDistrictName } from '../utils/bdGeoData';
+import { DistrictSelect } from './SearchableSelect';
 
 export const toBanglaNumber = (val: string | number | null | undefined): string => {
   if (val === null || val === undefined) return '';
@@ -16,22 +18,7 @@ export const toBanglaNumber = (val: string | number | null | undefined): string 
 };
 
 export const toBanglaDistrict = (d: string): string => {
-  const map: Record<string, string> = {
-    Bogura: 'বগুড়া',
-    Bogra: 'বগুড়া',
-    Rajshahi: 'রাজশাহী',
-    Rangpur: 'রংপুর',
-    Jashore: 'যশোর',
-    Dhaka: 'ঢাকা',
-    Mymensingh: 'ময়মনসিংহ',
-    Dinajpur: 'দিনাজপুর',
-    Chattogram: 'চট্টগ্রাম',
-    Sylhet: 'সিলেট',
-    Khulna: 'খুলনা',
-    Barishal: 'বরিশাল',
-    Cumilla: 'কুমিল্লা',
-  };
-  return map[d] || d;
+  return toBanglaDistrictName(d);
 };
 
 interface HeaderProps {
@@ -283,24 +270,17 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* District Selector (Only for authenticated users, hidden for admin) */}
+            {/* District Selector (All 64 Districts, searchable, hidden for admin) */}
             {currentUser && !isAdmin && (
-            <div className="flex items-center gap-1 bg-stone-100 border border-stone-200 rounded-lg px-2 py-1.5 text-xs">
-              <MapPin className="w-3.5 h-3.5 text-stone-500 shrink-0" />
-              <select
+              <DistrictSelect
                 value={selectedDistrict}
-                onChange={e => onDistrictChange(e.target.value)}
-                className="bg-transparent text-xs font-semibold text-stone-700 focus:outline-hidden cursor-pointer"
-                aria-label={t('Select district', 'জেলা নির্বাচন')}
-              >
-                <option value="Bogura">{language === 'bn' ? 'বগুড়া' : 'Bogura (বগুড়া)'}</option>
-                <option value="Rajshahi">{language === 'bn' ? 'রাজশাহী' : 'Rajshahi (রাজশাহী)'}</option>
-                <option value="Rangpur">{language === 'bn' ? 'রংপুর' : 'Rangpur (রংপুর)'}</option>
-                <option value="Jashore">{language === 'bn' ? 'যশোর' : 'Jashore (যশোর)'}</option>
-                <option value="Dhaka">{language === 'bn' ? 'ঢাকা' : 'Dhaka (ঢাকা)'}</option>
-                <option value="Mymensingh">{language === 'bn' ? 'ময়মনসিংহ' : 'Mymensingh (ময়মনসিংহ)'}</option>
-              </select>
-            </div>
+                onChange={onDistrictChange}
+                language={language}
+                variant="compact"
+                showIcon
+                dropdownAlign="right"
+                ariaLabel={t('Select district', 'জেলা নির্বাচন')}
+              />
             )}
 
             {/* Dark / Light Theme Toggle */}
@@ -516,14 +496,25 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
 
-          {/* Mobile hamburger button */}
-          <button
-            className="md:hidden w-9 h-9 flex items-center justify-center rounded-lg bg-stone-100 text-stone-700 cursor-pointer"
-            onClick={() => setMobileMenuOpen(v => !v)}
-            aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
-          >
-            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
+          {/* Mobile controls: theme toggle (always visible, incl. before login) + hamburger */}
+          <div className="md:hidden flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onThemeToggle}
+              className="w-9 h-9 flex items-center justify-center rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-200 cursor-pointer"
+              title={theme === 'dark' ? t('Switch to Light Mode', 'লাইট মোড চালু করুন') : t('Switch to Dark Mode', 'ডার্ক মোড চালু করুন')}
+              aria-label={t('Toggle theme', 'থিম পরিবর্তন')}
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-stone-600" />}
+            </button>
+            <button
+              className="w-9 h-9 flex items-center justify-center rounded-lg bg-stone-100 text-stone-700 cursor-pointer"
+              onClick={() => setMobileMenuOpen(v => !v)}
+              aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            >
+              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -606,20 +597,16 @@ export const Header: React.FC<HeaderProps> = ({
           )}
           {!isAdmin ? (
             <div className="grid grid-cols-3 gap-2">
-              <div className="col-span-2 flex items-center gap-1 bg-stone-100 rounded-lg px-2 py-1.5 text-xs">
-                <MapPin className="w-3.5 h-3.5 text-stone-500" />
-                <select
+              <div className="col-span-2">
+                <DistrictSelect
                   value={selectedDistrict}
-                  onChange={e => onDistrictChange(e.target.value)}
-                  className="bg-transparent text-xs font-semibold text-stone-700 focus:outline-hidden flex-1 cursor-pointer"
-                >
-                  <option value="Bogura">{language === 'bn' ? 'বগুড়া' : 'Bogura'}</option>
-                  <option value="Rajshahi">{language === 'bn' ? 'রাজশাহী' : 'Rajshahi'}</option>
-                  <option value="Rangpur">{language === 'bn' ? 'রংপুর' : 'Rangpur'}</option>
-                  <option value="Jashore">{language === 'bn' ? 'যশোর' : 'Jashore'}</option>
-                  <option value="Dhaka">{language === 'bn' ? 'ঢাকা' : 'Dhaka'}</option>
-                  <option value="Mymensingh">{language === 'bn' ? 'ময়মনসিংহ' : 'Mymensingh'}</option>
-                </select>
+                  onChange={onDistrictChange}
+                  language={language}
+                  variant="compact"
+                  showIcon
+                  className="w-full [&>button]:w-full"
+                  ariaLabel={t('Select district', 'জেলা নির্বাচন')}
+                />
               </div>
               <button
                 onClick={onLanguageToggle}

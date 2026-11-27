@@ -119,9 +119,18 @@ export const apiService = {
 
   async updateProfile(updates: Partial<User>): Promise<ApiResponse<{ user: User }>> {
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem('nb_auth_user') : null;
+        if (raw) {
+          const u = JSON.parse(raw);
+          if (u?.sessionToken) headers['Authorization'] = `Bearer ${u.sessionToken}`;
+        }
+      } catch {}
       const res = await fetch(`${BASE_URL}/users/profile`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers,
         body: JSON.stringify(updates),
       });
       return await res.json();

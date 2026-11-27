@@ -12,6 +12,12 @@ import { NotificationStore } from '../data/store';
 import { toBanglaNumber, toBanglaDistrict } from './Header';
 import { deduplicateProducts } from '../utils/productUtils';
 import {
+  getDefaultUpazilaForDistrict,
+  isValidUpazilaForDistrict,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import {
   Building2,
   Package,
   Truck,
@@ -63,6 +69,7 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
   const [cropsLoading, setCropsLoading] = useState(false);
   const [cropSearch, setCropSearch] = useState('');
   const [selectedDistrict, setSelectedDistrict] = useState('All');
+  const [selectedUpazila, setSelectedUpazila] = useState('All');
 
   // Purchase Modal (Wholesaler buys from Farmer)
   const [selectedCropToBuy, setSelectedCropToBuy] = useState<MarketplaceProduct | null>(null);
@@ -116,13 +123,18 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
   const [trackingOrderTarget, setTrackingOrderTarget] = useState<SupplyChainOrder | null>(null);
   const [challanOrderTarget, setChallanOrderTarget] = useState<SupplyChainOrder | null>(null);
 
+  const initialTenderDist = normalizeBdDistrictName(currentUser?.district || 'Bogura');
+  const initialTenderUpz = isValidUpazilaForDistrict(initialTenderDist, currentUser?.upazila)
+    ? currentUser.upazila!
+    : getDefaultUpazilaForDistrict(initialTenderDist);
+
   const [tenderForm, setTenderForm] = useState({
     cropName: '',
     quantityKgNeeded: 3000,
     offeredPricePerKg: 39,
-    district: currentUser?.district || 'Bogura',
-    upazila: currentUser?.upazila || '',
-    location: currentUser?.upazila ? `${currentUser.upazila}, ${currentUser.district} Arat Point` : 'Mahasthangarh Highway Delivery Point',
+    district: initialTenderDist,
+    upazila: initialTenderUpz,
+    location: currentUser?.upazila ? `${currentUser.upazila}, ${currentUser.district} Arat Point` : `${initialTenderUpz}, ${initialTenderDist} Arat Point`,
     deadline: 'Within 7 days',
   });
   const [submittingTender, setSubmittingTender] = useState(false);
@@ -149,7 +161,18 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
         district: selectedDistrict !== 'All' ? selectedDistrict : undefined,
         search: cropSearch.trim() || undefined,
       });
-      setFarmerCrops(deduplicateProducts(res.products || []));
+      const filtered = (res.products || []).filter((p) => {
+        if (
+          selectedDistrict !== 'All' &&
+          selectedUpazila !== 'All' &&
+          p.upazila &&
+          p.upazila.toLowerCase() !== selectedUpazila.toLowerCase()
+        ) {
+          return false;
+        }
+        return true;
+      });
+      setFarmerCrops(deduplicateProducts(filtered));
     } catch (e) {
       console.error('Failed to load farmer harvests', e);
     } finally {
@@ -212,10 +235,13 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
 
   useEffect(() => {
     loadFarmerCrops();
+  }, [currentUser.id, selectedDistrict, selectedUpazila]);
+
+  useEffect(() => {
     loadMyListings();
     loadRetailerOrders();
     loadFarmerOrders();
-  }, [currentUser.id, selectedDistrict]);
+  }, [currentUser.id]);
 
   // Reactive listener for real-time order updates without page reload
   useEffect(() => {
@@ -683,24 +709,44 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
               />
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <span className="text-xs font-bold text-stone-600 shrink-0">District:</span>
-              <select
-                value={selectedDistrict}
-                onChange={(e) => setSelectedDistrict(e.target.value)}
-                className="bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs font-semibold text-stone-800"
-              >
-                <option value="All">All Districts</option>
-                <option value="Bogura">Bogura</option>
-                <option value="Dhaka">Dhaka</option>
-                <option value="Rajshahi">Rajshahi</option>
-                <option value="Rangpur">Rangpur</option>
-              </select>
+            <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+              <span className="text-xs font-bold text-stone-600 shrink-0">
+                {t('District:', 'জেলা:')}
+              </span>
+              <div className="w-44 sm:w-48">
+                <DistrictSelect
+                  value={selectedDistrict}
+                  onChange={(val) => {
+                    setSelectedDistrict(val === 'All' ? 'All' : normalizeBdDistrictName(val));
+                    setSelectedUpazila('All');
+                  }}
+                  language={language}
+                  includeAll
+                  allValue="All"
+                  allLabelEn="All Districts (64)"
+                  allLabelBn="সকল জেলা (৬৪টি)"
+                  showIcon
+                />
+              </div>
+              {selectedDistrict !== 'All' && (
+                <div className="w-40 sm:w-44">
+                  <UpazilaSelect
+                    district={selectedDistrict}
+                    value={selectedUpazila}
+                    onChange={setSelectedUpazila}
+                    language={language}
+                    includeAll
+                    allValue="All"
+                    allLabelEn="All Upazilas"
+                    allLabelBn="সকল উপজেলা"
+                  />
+                </div>
+              )}
               <button
                 onClick={loadFarmerCrops}
-                className="bg-stone-900 text-white px-3 py-2 rounded-xl text-xs font-bold shrink-0 hover:bg-stone-800"
+                className="bg-stone-900 text-white px-3 py-2 rounded-xl text-xs font-bold shrink-0 hover:bg-stone-800 cursor-pointer"
               >
-                Filter
+                {t('Filter', 'ফিল্টার')}
               </button>
             </div>
           </div>
@@ -1329,25 +1375,40 @@ export const WholesalerDashboard: React.FC<WholesalerDashboardProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block font-bold text-stone-700 mb-1">
                   {t('Collection District', 'সংগ্রহের জেলা')} *
                 </label>
-                <select
+                <DistrictSelect
                   value={tenderForm.district}
-                  onChange={(e) => setTenderForm((f) => ({ ...f, district: e.target.value }))}
-                  className="w-full px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
-                >
-                  <option value="Bogura">{t('Bogura', 'বগুড়া')}</option>
-                  <option value="Rajshahi">{t('Rajshahi', 'রাজশাহী')}</option>
-                  <option value="Rangpur">{t('Rangpur', 'রংপুর')}</option>
-                  <option value="Dinajpur">{t('Dinajpur', 'দিনাজপুর')}</option>
-                  <option value="Dhaka">{t('Dhaka', 'ঢাকা')}</option>
-                  <option value="Jashore">{t('Jashore', 'যশোর')}</option>
-                  <option value="Chattogram">{t('Chattogram', 'চট্টগ্রাম')}</option>
-                  <option value="Mymensingh">{t('Mymensingh', 'ময়মনসিংহ')}</option>
-                </select>
+                  onChange={(newDist) => {
+                    const defUpz = getDefaultUpazilaForDistrict(newDist);
+                    setTenderForm((f) => ({
+                      ...f,
+                      district: newDist,
+                      upazila: defUpz || '',
+                    }));
+                  }}
+                  language={language}
+                  showIcon
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-stone-700 mb-1">
+                  {t('Collection Upazila', 'সংগ্রহের উপজেলা')} *
+                </label>
+                <UpazilaSelect
+                  district={tenderForm.district}
+                  value={tenderForm.upazila}
+                  onChange={(newUpz) =>
+                    setTenderForm((f) => ({
+                      ...f,
+                      upazila: newUpz,
+                    }))
+                  }
+                  language={language}
+                />
               </div>
               <div>
                 <label className="block font-bold text-stone-700 mb-1">

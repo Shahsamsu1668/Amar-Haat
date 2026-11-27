@@ -547,7 +547,7 @@ export function findDistrictInfo(districtName: string): DistrictInfo {
   if (norm.replace(/['\s]/g, '') === 'coxsbazar') return ALL_64_DISTRICTS.find((d) => d.name === "Cox's Bazar")!;
   if (norm === 'moulvibazar') return ALL_64_DISTRICTS.find((d) => d.name === 'Moulvibazar')!;
   if (norm === 'netrakona') return ALL_64_DISTRICTS.find((d) => d.name === 'Netrokona')!;
-  if (norm.includes('nawabganj')) return ALL_64_DISTRICTS.find((d) => d.name === 'Chapai Nawabganj')!;
+  if (norm.includes('nawabganj')) return ALL_64_DISTRICTS.find((d) => d.name === 'Chapainawabganj')!;
   if (norm.replace(/[.\s]/g, '') === 'bbaria' || norm === 'brahmanbaria') return ALL_64_DISTRICTS.find((d) => d.name === 'Brahmanbaria')!;
 
   // Default fallback

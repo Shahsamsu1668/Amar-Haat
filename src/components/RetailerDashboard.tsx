@@ -11,6 +11,8 @@ import { toBanglaNumber } from './Header';
 import { deduplicateProducts } from '../utils/productUtils';
 import { NotificationStore } from '../data/store';
 import { MASTER_AGRICULTURAL_CATALOG } from '../data/catalogData';
+import { BD_GEO_DATA, normalizeBdDistrictName } from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
 import {
   Store,
   Camera,
@@ -171,15 +173,17 @@ export function translateMetadata(text: string | undefined, lang: Language): str
     return METADATA_TRANSLATIONS[text];
   }
   let translated = text;
+  for (const d of BD_GEO_DATA) {
+    if (translated.includes(d.district)) {
+      translated = translated.split(d.district).join(d.districtBn);
+    }
+    for (const u of d.upazilaList) {
+      if (translated.includes(u.en)) {
+        translated = translated.split(u.en).join(u.bn);
+      }
+    }
+  }
   translated = translated
-    .replace(/Bogura/g, 'বগুড়া')
-    .replace(/Shibganj/g, 'শিবগঞ্জ')
-    .replace(/Sherpur/g, 'শেরপুর')
-    .replace(/Gabtali/g, 'গাবতলী')
-    .replace(/Dhaka/g, 'ঢাকা')
-    .replace(/Rajshahi/g, 'রাজশাহী')
-    .replace(/Rangpur/g, 'রংপুর')
-    .replace(/Jashore/g, 'যশোর')
     .replace(/Farmer Cooperatives/g, 'কৃষক সমবায়')
     .replace(/Farmer Cooperative/g, 'কৃষক সমবায়')
     .replace(/Wholesale Arat Hub/g, 'পাইকারি আড়ত হাব')
@@ -246,6 +250,8 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
   const [wholesaleListings, setWholesaleListings] = useState<MarketplaceProduct[]>([]);
   const [wholesaleLoading, setWholesaleLoading] = useState(false);
   const [wholesaleSearch, setWholesaleSearch] = useState('');
+  const [wholesaleDistrict, setWholesaleDistrict] = useState('All');
+  const [wholesaleUpazila, setWholesaleUpazila] = useState('All');
   const [selectedWholesaleLot, setSelectedWholesaleLot] = useState<MarketplaceProduct | null>(null);
   const [orderKg, setOrderKg] = useState(100);
   const [submittingWholesaleOrder, setSubmittingWholesaleOrder] = useState(false);
@@ -301,12 +307,22 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
       const res = await productApi.getProducts({
         sellerRole: 'wholesaler',
         targetRole: 'retailer',
+        district: wholesaleDistrict !== 'All' ? wholesaleDistrict : undefined,
         search: wholesaleSearch.trim() || undefined,
       });
       // Safety filter: ensure no farmer or unauthorized listings are displayed to retailers
-      const strictlyWholesalers = (res.products || []).filter(
-        (p) => (p.sellerRole || '').toLowerCase() === 'wholesaler'
-      );
+      const strictlyWholesalers = (res.products || []).filter((p) => {
+        if ((p.sellerRole || '').toLowerCase() !== 'wholesaler') return false;
+        if (
+          wholesaleDistrict !== 'All' &&
+          wholesaleUpazila !== 'All' &&
+          p.upazila &&
+          p.upazila.toLowerCase() !== wholesaleUpazila.toLowerCase()
+        ) {
+          return false;
+        }
+        return true;
+      });
       setWholesaleListings(deduplicateProducts(strictlyWholesalers));
     } catch (e) {
       console.error('Failed to load wholesale listings', e);
@@ -354,9 +370,12 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
 
   useEffect(() => {
     loadMyRetailProducts();
-    loadWholesaleListings();
     loadConsumerOrders();
   }, [currentUser.id]);
+
+  useEffect(() => {
+    loadWholesaleListings();
+  }, [currentUser.id, wholesaleDistrict, wholesaleUpazila]);
 
   // Reactive listener for real-time order updates without page reload
   useEffect(() => {
@@ -741,7 +760,7 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
       {/* ─── TAB 1: WHOLESALER-RETAILER TRADE (পাইকার-খুচরা বিক্রেতার বাণিজ্য) ───── */}
       {activeTab === 'wholesaler_retailer_trade' && (
         <div className="space-y-4">
-          <div className="bg-white p-4 rounded-2xl border border-stone-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xs">
+          <div className="bg-white p-4 rounded-2xl border border-stone-200 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 shadow-2xs">
             <div className="relative flex-1 w-full">
               <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
@@ -753,12 +772,43 @@ export const RetailerDashboard: React.FC<RetailerDashboardProps> = ({
                 className="w-full pl-9 pr-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:outline-hidden font-medium"
               />
             </div>
-            <button
-              onClick={loadWholesaleListings}
-              className="bg-stone-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-stone-800 cursor-pointer w-full sm:w-auto"
-            >
-              {t('Filter Lots', 'লট খুঁজুন')}
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="w-44 sm:w-48">
+                <DistrictSelect
+                  value={wholesaleDistrict}
+                  onChange={(val) => {
+                    setWholesaleDistrict(val === 'All' ? 'All' : normalizeBdDistrictName(val));
+                    setWholesaleUpazila('All');
+                  }}
+                  language={language}
+                  includeAll
+                  allValue="All"
+                  allLabelEn="All Districts (64)"
+                  allLabelBn="সকল জেলা (৬৪টি)"
+                  showIcon
+                />
+              </div>
+              {wholesaleDistrict !== 'All' && (
+                <div className="w-40 sm:w-44">
+                  <UpazilaSelect
+                    district={wholesaleDistrict}
+                    value={wholesaleUpazila}
+                    onChange={setWholesaleUpazila}
+                    language={language}
+                    includeAll
+                    allValue="All"
+                    allLabelEn="All Upazilas"
+                    allLabelBn="সকল উপজেলা"
+                  />
+                </div>
+              )}
+              <button
+                onClick={loadWholesaleListings}
+                className="bg-stone-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-stone-800 cursor-pointer shrink-0"
+              >
+                {t('Filter Lots', 'লট খুঁজুন')}
+              </button>
+            </div>
           </div>
 
           {wholesaleLoading && (

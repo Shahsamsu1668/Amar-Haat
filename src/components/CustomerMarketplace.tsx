@@ -4,6 +4,8 @@ import { productApi, orderApi } from '../services/api';
 import { toBanglaNumber } from './Header';
 import { deduplicateProducts } from '../utils/productUtils';
 import { getCropName, getCropDescription, translateMetadata } from './RetailerDashboard';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import { normalizeBdDistrictName } from '../utils/bdGeoData';
 import {
   ShoppingCart,
   Plus,
@@ -40,7 +42,6 @@ interface CustomerMarketplaceProps {
 }
 
 const CATEGORIES = ['All', 'Vegetables', 'Tubers', 'Spices', 'Grains', 'Fruits'];
-const DISTRICTS = ['All', 'Bogura', 'Dhaka', 'Rajshahi', 'Rangpur', 'Dinajpur'];
 
 export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
   language,
@@ -54,6 +55,7 @@ export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
   // Filters & Search
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedDistrict, setSelectedDistrict] = useState('All');
+  const [selectedUpazila, setSelectedUpazila] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Cart & Drawer
@@ -115,7 +117,17 @@ export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
         category: selectedCategory !== 'All' ? selectedCategory : undefined,
         search: searchQuery.trim() || undefined,
       });
-      const strictlyRetail = (res.products || []).filter((p) => (p.sellerRole || '').toLowerCase() === 'retailer');
+      const strictlyRetail = (res.products || []).filter((p) => {
+        if ((p.sellerRole || '').toLowerCase() !== 'retailer') return false;
+        if (
+          selectedUpazila !== 'All' &&
+          p.upazila &&
+          p.upazila.toLowerCase() !== selectedUpazila.toLowerCase()
+        ) {
+          return false;
+        }
+        return true;
+      });
       setProducts(deduplicateProducts(strictlyRetail));
     } catch (err: any) {
       console.error('Failed to load marketplace products', err);
@@ -131,7 +143,7 @@ export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
 
   useEffect(() => {
     fetchProducts();
-  }, [selectedCategory, selectedDistrict]);
+  }, [selectedCategory, selectedDistrict, selectedUpazila]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -406,23 +418,47 @@ export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
             </button>
           </form>
 
-          {/* District Selector */}
-          <div className="flex items-center gap-2 shrink-0">
-            <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span className="text-xs font-bold text-stone-600 shrink-0">
+          {/* Searchable 64-District & Dynamic Upazila Selector */}
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
+            <span className="text-xs font-bold text-stone-600 shrink-0 flex items-center gap-1">
+              <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
               {language === 'bn' ? 'জেলা:' : 'District:'}
             </span>
-            <select
-              value={selectedDistrict}
-              onChange={(e) => setSelectedDistrict(e.target.value)}
-              className="bg-stone-50 border border-stone-200 text-xs font-semibold text-stone-800 rounded-xl px-3 py-2 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-            >
-              {DISTRICTS.map((d) => (
-                <option key={d} value={d}>
-                  {d === 'All' ? (language === 'bn' ? 'সকল জেলা' : 'All Districts') : d}
-                </option>
-              ))}
-            </select>
+            <div className="w-44 sm:w-48">
+              <DistrictSelect
+                value={selectedDistrict}
+                onChange={(newDist) => {
+                  setSelectedDistrict(newDist === 'All' ? 'All' : normalizeBdDistrictName(newDist));
+                  setSelectedUpazila('All');
+                }}
+                language={language}
+                includeAll
+                allValue="All"
+                allLabelEn="All Districts (64)"
+                allLabelBn="সকল জেলা (৬৪টি)"
+              />
+            </div>
+
+            {selectedDistrict !== 'All' && (
+              <>
+                <span className="text-xs font-bold text-stone-600 shrink-0">
+                  {language === 'bn' ? 'উপজেলা:' : 'Upazila:'}
+                </span>
+                <div className="w-40 sm:w-44">
+                  <UpazilaSelect
+                    district={selectedDistrict}
+                    value={selectedUpazila}
+                    onChange={setSelectedUpazila}
+                    language={language}
+                    includeAll
+                    allValue="All"
+                    allLabelEn="All Upazilas"
+                    allLabelBn="সকল উপজেলা"
+                    dropdownAlign="right"
+                  />
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -496,6 +532,7 @@ export const CustomerMarketplace: React.FC<CustomerMarketplaceProps> = ({
                 onClick={() => {
                   setSelectedCategory('All');
                   setSelectedDistrict('All');
+                  setSelectedUpazila('All');
                   setSearchQuery('');
                   fetchProducts();
                 }}

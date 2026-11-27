@@ -11,6 +11,14 @@ import {
   ConnectionStore,
 } from '../data/store';
 import {
+  getDefaultUpazilaForDistrict,
+  getDistrictLabel,
+  getUpazilaLabel,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import { apiService } from '../services/apiService';
+import {
   ArrowLeft,
   Mail,
   Phone,
@@ -197,7 +205,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(user.name);
   const [editPhone, setEditPhone] = useState(user.phone);
-  const [editDistrict, setEditDistrict] = useState(user.district || 'Bogura');
+  const [editDistrict, setEditDistrict] = useState(
+    normalizeBdDistrictName(user.district || 'Bogura')
+  );
+  const [editUpazila, setEditUpazila] = useState(
+    user.upazila || getDefaultUpazilaForDistrict(user.district || 'Bogura')
+  );
   const [editEducation, setEditEducation] = useState(user.education || '');
   const [editFarmSize, setEditFarmSize] = useState(user.farmSizeAcres || 4.5);
   const [editBusinessName, setEditBusinessName] = useState(user.businessName || '');
@@ -293,23 +306,33 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
     }
   }, [user, language, cropListings, businessDemands, supplierProducts, orders, tradeOrders, advisories, editFarmSize, allUsers]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const updates: Partial<User> = {
       name: editName,
       phone: editPhone,
       district: editDistrict,
+      upazila: editUpazila || getDefaultUpazilaForDistrict(editDistrict),
       education: editEducation,
     };
     if (user.role === 'farmer') updates.farmSizeAcres = editFarmSize;
     if (user.role === 'wholesaler') updates.businessName = editBusinessName;
     if (user.role === 'retailer') updates.shopName = editShopName;
-    const updated = AuthStore.updateProfile(updates);
-    if (updated && onUpdateUser) {
-      onUpdateUser(updated);
-      setSaveSuccess(true);
-      setIsEditing(false);
-      setTimeout(() => setSaveSuccess(false), 3000);
+    try {
+      await apiService.updateProfile({ id: user.id, ...updates });
+    } catch {
+      // Offline / local fallback handled below
     }
+    const updated = AuthStore.updateProfile(updates);
+    const mergedUser = updated || { ...user, ...updates };
+    if (isOwnProfile) {
+      AuthStore.setCurrentUser(mergedUser);
+    }
+    if (onUpdateUser) {
+      onUpdateUser(mergedUser);
+    }
+    setSaveSuccess(true);
+    setIsEditing(false);
+    setTimeout(() => setSaveSuccess(false), 3000);
   };
 
   const tabs: { id: TabId; label: string; labelBn: string; icon: React.ReactNode }[] = [
@@ -385,7 +408,12 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               </span>
               <span className="flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-stone-400 shrink-0" />
-                <span>{user.district}{user.upazila ? `, ${user.upazila}` : ''}</span>
+                <span>
+                  {getDistrictLabel(user.district, language)}
+                  {user.upazila
+                    ? `, ${getUpazilaLabel(user.district, user.upazila, language)}`
+                    : ''}
+                </span>
               </span>
               {user.education && (
                 <span className="flex items-center gap-1.5">
@@ -837,7 +865,36 @@ export const UserProfilePage: React.FC<UserProfilePageProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <EditField label={language === 'bn' ? 'পূর্ণ নাম' : 'Full Name'} value={editName} onChange={setEditName} disabled={!isEditing} />
                 <EditField label={language === 'bn' ? 'ফোন নম্বর' : 'Phone Number'} value={editPhone} onChange={setEditPhone} disabled={!isEditing} />
-                <EditField label={language === 'bn' ? 'জেলা' : 'District'} value={editDistrict} onChange={setEditDistrict} disabled={!isEditing} />
+                <div>
+                  <label className="block text-[11px] font-bold text-stone-500 uppercase mb-1">
+                    {language === 'bn' ? 'জেলা' : 'District'}
+                  </label>
+                  <DistrictSelect
+                    value={editDistrict}
+                    onChange={(newDist) => {
+                      setEditDistrict(newDist);
+                      const defUpz = getDefaultUpazilaForDistrict(newDist);
+                      if (defUpz) setEditUpazila(defUpz);
+                    }}
+                    language={language}
+                    disabled={!isEditing}
+                    showIcon
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-stone-500 uppercase mb-1">
+                    {language === 'bn' ? 'উপজেলা' : 'Upazila'}
+                  </label>
+                  <UpazilaSelect
+                    district={editDistrict}
+                    value={editUpazila}
+                    onChange={setEditUpazila}
+                    language={language}
+                    disabled={!isEditing}
+                    preserveLegacyValue
+                    dropdownAlign="right"
+                  />
+                </div>
                 <EditField label={language === 'bn' ? 'শিক্ষাগত যোগ্যতা' : 'Education'} value={editEducation} onChange={setEditEducation} disabled={!isEditing} />
                 {user.role === 'farmer' && (
                   <EditField label={language === 'bn' ? 'জমির আকার (একর)' : 'Farm Size (acres)'} value={String(editFarmSize)} onChange={(v) => setEditFarmSize(parseFloat(v) || 0)} type="number" disabled={!isEditing} />

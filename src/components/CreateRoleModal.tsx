@@ -1,7 +1,12 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { User, Language, UserRole } from '../types';
 import { AuthStore } from '../data/store';
-import { BANGLADESH_LOCATIONS } from '../data/mockData';
+import {
+  getDefaultUpazilaForDistrict,
+  isValidUpazilaForDistrict,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
 import {
   X,
   Sprout,
@@ -53,12 +58,17 @@ export const CreateRoleModal: React.FC<CreateRoleModalProps> = ({
   const t = (en: string, bn: string) => (language === 'bn' ? bn : en);
   const meta = ROLE_META[targetRole] || ROLE_META.farmer;
 
+  const initialDist = normalizeBdDistrictName(currentUser.district || 'Bogura');
+  const initialUpz = isValidUpazilaForDistrict(initialDist, currentUser.upazila)
+    ? currentUser.upazila!
+    : getDefaultUpazilaForDistrict(initialDist);
+
   // Form states pre-filled from current user
   const [name, setName] = useState(currentUser.name);
   const [email] = useState(currentUser.email);
   const [phone] = useState(currentUser.phone);
-  const [district, setDistrict] = useState(currentUser.district || 'Bogura');
-  const [upazila, setUpazila] = useState(currentUser.upazila || 'Shibganj');
+  const [district, setDistrict] = useState(initialDist);
+  const [upazila, setUpazila] = useState(initialUpz);
   const [education, setEducation] = useState(currentUser.education || 'Graduate');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -73,9 +83,6 @@ export const CreateRoleModal: React.FC<CreateRoleModalProps> = ({
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-
-  const selectedLoc = BANGLADESH_LOCATIONS.find((l) => l.district.toLowerCase() === district.toLowerCase());
-  const upazilas = selectedLoc ? selectedLoc.upazilas : [];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -172,38 +179,33 @@ export const CreateRoleModal: React.FC<CreateRoleModalProps> = ({
           </div>
 
           {/* District & Upazila */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] font-bold text-stone-600 uppercase mb-1">
                 {t('District', 'জেলা')}
               </label>
-              <select
+              <DistrictSelect
                 value={district}
-                onChange={(e) => setDistrict(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-stone-200 rounded-xl focus:ring-2 focus:ring-emerald-500 font-medium text-stone-800 bg-white"
-              >
-                {BANGLADESH_LOCATIONS.map((loc) => (
-                  <option key={loc.district} value={loc.district}>
-                    {loc.district} ({loc.districtBn})
-                  </option>
-                ))}
-              </select>
+                onChange={(newDist) => {
+                  setDistrict(newDist);
+                  const defUpz = getDefaultUpazilaForDistrict(newDist);
+                  if (defUpz) setUpazila(defUpz);
+                }}
+                language={language}
+                showIcon
+              />
             </div>
             <div>
               <label className="block text-[11px] font-bold text-stone-600 uppercase mb-1">
                 {t('Upazila', 'উপজেলা')}
               </label>
-              <select
+              <UpazilaSelect
+                district={district}
                 value={upazila}
-                onChange={(e) => setUpazila(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-stone-200 rounded-xl focus:ring-2 focus:ring-emerald-500 font-medium text-stone-800 bg-white"
-              >
-                {upazilas.map((upz) => (
-                  <option key={upz} value={upz}>
-                    {upz}
-                  </option>
-                ))}
-              </select>
+                onChange={setUpazila}
+                language={language}
+                dropdownAlign="right"
+              />
             </div>
           </div>
 

@@ -5,6 +5,13 @@ import { BANGLADESH_LOCATIONS, INITIAL_MARKET_RATES } from '../data/mockData';
 import { MarketRateStore } from '../data/store';
 import { toBanglaNumber, toBanglaDistrict } from './Header';
 import {
+  findBdDistrict,
+  getDistrictLabel,
+  getUpazilaLabel,
+  normalizeBdDistrictName,
+} from '../utils/bdGeoData';
+import { DistrictSelect, UpazilaSelect } from './SearchableSelect';
+import {
   TrendingUp,
   TrendingDown,
   Minus,
@@ -610,19 +617,34 @@ export function formatPriceRange(
  * Guarantees distinct local prices for each district.
  */
 function generateDistrictRates(district: string, fluctuationMap: Record<string, number> = {}): MarketRate[] {
-  const normKey = district.trim().toLowerCase();
-  const profile = DISTRICT_PROFILES[normKey] || {
-    district,
-    districtBn: toBanglaDistrict(district),
-    marketName: `${district} Central Agro Mandi`,
-    marketNameBn: `${toBanglaDistrict(district)} কেন্দ্রীয় পাইকারি মোকাম`,
-    factors: {
-      Vegetables: 0.95 + ((district.charCodeAt(0) % 15) / 100),
-      Tubers: 0.95 + ((district.charCodeAt(1) % 15) / 100),
-      Grains: 0.95 + ((district.charCodeAt(2 % district.length) % 15) / 100),
-      Spices: 0.95 + ((district.charCodeAt(0) % 20) / 100),
-      Fruits: 0.95 + ((district.charCodeAt(1) % 20) / 100),
-    },
+  const geoInfo = findBdDistrict(district);
+  const canonicalDistrict = geoInfo ? geoInfo.district : district;
+  const normKey = canonicalDistrict.trim().toLowerCase();
+  const divisionFactorMap: Record<string, DistrictProfile['factors']> = {
+    Rajshahi: { Vegetables: 0.92, Tubers: 0.88, Grains: 0.94, Spices: 0.92, Fruits: 0.90 },
+    Rangpur: { Vegetables: 0.88, Tubers: 0.84, Grains: 0.92, Spices: 0.90, Fruits: 0.95 },
+    Khulna: { Vegetables: 0.90, Tubers: 0.98, Grains: 0.96, Spices: 0.95, Fruits: 0.92 },
+    Chattogram: { Vegetables: 1.20, Tubers: 1.16, Grains: 1.08, Spices: 1.20, Fruits: 1.15 },
+    Sylhet: { Vegetables: 1.16, Tubers: 1.14, Grains: 1.06, Spices: 1.16, Fruits: 1.18 },
+    Barishal: { Vegetables: 1.04, Tubers: 1.04, Grains: 1.02, Spices: 1.06, Fruits: 0.92 },
+    Mymensingh: { Vegetables: 0.94, Tubers: 0.95, Grains: 0.92, Spices: 0.96, Fruits: 0.95 },
+    Dhaka: { Vegetables: 1.08, Tubers: 1.08, Grains: 1.04, Spices: 1.10, Fruits: 1.12 },
+  };
+  const baseFactors =
+    (geoInfo && divisionFactorMap[geoInfo.division]) || {
+      Vegetables: 0.95 + ((canonicalDistrict.charCodeAt(0) % 15) / 100),
+      Tubers: 0.95 + ((canonicalDistrict.charCodeAt(1 % canonicalDistrict.length) % 15) / 100),
+      Grains: 0.95 + ((canonicalDistrict.charCodeAt(2 % canonicalDistrict.length) % 15) / 100),
+      Spices: 0.95 + ((canonicalDistrict.charCodeAt(0) % 20) / 100),
+      Fruits: 0.95 + ((canonicalDistrict.charCodeAt(1 % canonicalDistrict.length) % 20) / 100),
+    };
+
+  const profile: DistrictProfile = DISTRICT_PROFILES[normKey] || {
+    district: canonicalDistrict,
+    districtBn: geoInfo ? geoInfo.districtBn : toBanglaDistrict(canonicalDistrict),
+    marketName: geoInfo ? geoInfo.marketName : `${canonicalDistrict} Central Agro Mandi`,
+    marketNameBn: geoInfo ? geoInfo.marketNameBn : `${toBanglaDistrict(canonicalDistrict)} কেন্দ্রীয় পাইকারি মোকাম`,
+    factors: baseFactors,
     trendBase: 0.0,
   };
 
@@ -715,7 +737,10 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
   selectedDistrict = 'Bogura',
   onDistrictChange,
 }) => {
-  const [districtFilter, setDistrictFilter] = useState(selectedDistrict);
+  const [districtFilter, setDistrictFilter] = useState(() =>
+    normalizeBdDistrictName(selectedDistrict)
+  );
+  const [upazilaFilter, setUpazilaFilter] = useState<string>('All');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
@@ -768,16 +793,19 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
   // Keep internal district in sync with parent prop
   useEffect(() => {
     if (selectedDistrict) {
-      setDistrictFilter(selectedDistrict);
+      setDistrictFilter(normalizeBdDistrictName(selectedDistrict));
+      setUpazilaFilter('All');
     }
   }, [selectedDistrict]);
 
-  // Reset fluctuations when switching district so base realistic values show cleanly
+  // Reset fluctuations and upazila filter when switching district so base realistic values show cleanly
   const handleDistrictSelect = (d: string) => {
-    setDistrictFilter(d);
+    const canonical = normalizeBdDistrictName(d);
+    setDistrictFilter(canonical);
+    setUpazilaFilter('All');
     setFluctuations({});
     if (onDistrictChange) {
-      onDistrictChange(d);
+      onDistrictChange(canonical);
     }
   };
 
@@ -873,14 +901,27 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
     return counts;
   }, [currentDistrictRates]);
 
-  const primaryMarketName =
-    language === 'bn'
-      ? currentDistrictRates[0]?.marketNameBn || 'প্রধান মোকাম'
-      : currentDistrictRates[0]?.marketName || 'Primary Market';
+  const selectedUpazilaDisplay =
+    upazilaFilter && upazilaFilter !== 'All'
+      ? getUpazilaLabel(activeDistrict, upazilaFilter, language)
+      : '';
 
-  const activeDistrictBn =
-    BANGLADESH_LOCATIONS.find((l) => l.district.toLowerCase() === activeDistrict.toLowerCase())?.districtBn ||
-    toBanglaDistrict(activeDistrict);
+  const primaryMarketName = selectedUpazilaDisplay
+    ? language === 'bn'
+      ? `${selectedUpazilaDisplay} হাট • ${currentDistrictRates[0]?.marketNameBn || 'প্রধান মোকাম'}`
+      : `${selectedUpazilaDisplay} Haat • ${currentDistrictRates[0]?.marketName || 'Primary Market'}`
+    : language === 'bn'
+    ? currentDistrictRates[0]?.marketNameBn || 'প্রধান মোকাম'
+    : currentDistrictRates[0]?.marketName || 'Primary Market';
+
+  const activeDistrictBn = getDistrictLabel(activeDistrict, 'bn') || toBanglaDistrict(activeDistrict);
+  const activeLocationHeading = selectedUpazilaDisplay
+    ? language === 'bn'
+      ? `${selectedUpazilaDisplay}, ${activeDistrictBn}`
+      : `${selectedUpazilaDisplay}, ${activeDistrict}`
+    : language === 'bn'
+    ? activeDistrictBn
+    : activeDistrict;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -912,7 +953,7 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
               <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
                 {t('Daily Market Prices:', 'দৈনিক কৃষিপণ্য বাজার দর:')}{' '}
                 <span className="text-emerald-400 underline decoration-emerald-500/50 underline-offset-4">
-                  {language === 'bn' ? activeDistrictBn : activeDistrict}
+                  {activeLocationHeading}
                 </span>
               </h1>
 
@@ -988,23 +1029,35 @@ export const MarketRatesView: React.FC<MarketRatesViewProps> = ({
       {/* ─── Filter & Control Area with Secondary Refresh Button ─── */}
       <div className="bg-white p-4 sm:p-5 rounded-2xl border border-stone-200 shadow-xs space-y-4">
         <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
-          {/* District Dropdown Selector */}
-          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-            <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span className="text-xs font-bold text-stone-700 whitespace-nowrap">
-              {t('Market Area / District:', 'বাজার এলাকা / জেলা:')}
+          {/* Searchable 64-District & Dynamic Upazila Selector */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-stone-700 whitespace-nowrap flex items-center gap-1.5">
+              <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
+              {t('District:', 'জেলা:')}
             </span>
-            <select
-              value={activeDistrict}
-              onChange={(e) => handleDistrictSelect(e.target.value)}
-              className="px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl text-xs font-bold text-stone-900 focus:outline-emerald-600 cursor-pointer shadow-2xs"
-            >
-              {BANGLADESH_LOCATIONS.map((loc) => (
-                <option key={loc.district} value={loc.district}>
-                  {language === 'bn' ? `${loc.districtBn} (${loc.district})` : `${loc.district} (${loc.districtBn})`}
-                </option>
-              ))}
-            </select>
+            <div className="w-48 sm:w-52">
+              <DistrictSelect
+                value={activeDistrict}
+                onChange={handleDistrictSelect}
+                language={language}
+              />
+            </div>
+
+            <span className="text-xs font-bold text-stone-700 whitespace-nowrap">
+              {t('Upazila:', 'উপজেলা:')}
+            </span>
+            <div className="w-44 sm:w-48">
+              <UpazilaSelect
+                district={activeDistrict}
+                value={upazilaFilter}
+                onChange={setUpazilaFilter}
+                language={language}
+                includeAll
+                allValue="All"
+                allLabelEn="All Upazilas"
+                allLabelBn="সকল উপজেলা"
+              />
+            </div>
 
             {/* Clickable Refresh Button next to Filter Area */}
             <button
