@@ -43,6 +43,7 @@ interface AuthPageProps {
   onBack?: () => void;
   initialMode?: 'login' | 'register';
   initialRole?: 'farmer' | 'wholesaler' | 'retailer' | 'consumer';
+  adminOnly?: boolean;
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({
@@ -52,6 +53,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   onBack,
   initialMode = 'login',
   initialRole = 'farmer',
+  adminOnly = false,
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   useEffect(() => {
@@ -69,8 +71,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [loginPassword, setLoginPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Admin access portal state
-  const [isAdminMode, setIsAdminMode] = useState(false);
+  // Admin access portal state (isolated to dedicated /amarhaatadmin route)
+  const [isAdminMode, setIsAdminMode] = useState<boolean>(Boolean(adminOnly));
+  useEffect(() => {
+    setIsAdminMode(Boolean(adminOnly));
+  }, [adminOnly]);
   const [adminUsername, setAdminUsername] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [adminPin, setAdminPin] = useState('');
@@ -487,12 +492,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   {t('Authorized Administrator Access', 'অনুমোদিত অ্যাডমিন পোর্টাল')}
                 </h2>
               </div>
-              <button
-                onClick={() => { setIsAdminMode(false); setError(''); }}
-                className="text-xs font-bold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
-              >
-                {t('Return to Public Login', 'সাধারণ লগইনে ফিরুন')}
-              </button>
+              {onBack && (
+                <button
+                  onClick={() => {
+                    setError('');
+                    onBack();
+                  }}
+                  className="text-xs font-bold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
+                >
+                  {t('Return to Public Login', 'সাধারণ লগইনে ফিরুন')}
+                </button>
+              )}
             </div>
 
             <div className="p-3 bg-slate-50 dark:bg-stone-800/70 border border-slate-200 dark:border-stone-700 rounded-xl text-xs text-slate-700 dark:text-stone-200 font-medium">
@@ -1142,17 +1152,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </form>
             )}
 
-            {/* Restricted Administrator Portal Link */}
-            <div className="pt-4 border-t border-stone-100 dark:border-stone-800 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
+            {/* Footer Note (Public Admin Login link removed; Admin Login isolated at /amarhaatadmin) */}
+            <div className="pt-4 border-t border-stone-100 dark:border-stone-800 flex items-center justify-center text-[11px] text-stone-500 dark:text-stone-400">
               <span>{language === 'bn' ? 'আমার হাট পাইলট • বাংলাদেশ' : 'Amar Haat Pilot • Bangladesh'}</span>
-              <button
-                type="button"
-                onClick={() => { setIsAdminMode(true); setError(''); }}
-                className="flex items-center gap-1 text-stone-500 dark:text-stone-300 hover:text-stone-800 dark:hover:text-white font-semibold transition-colors cursor-pointer"
-              >
-                <KeyRound className="w-3 h-3 text-slate-500 dark:text-slate-400" />
-                <span>{t('Authorized Admin Portal', 'অনুমোদিত অ্যাডমিন প্রবেশ')}</span>
-              </button>
             </div>
           </div>
         )}
@@ -1160,3 +1162,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     </div>
   );
 };
+
+export const AdminLoginPage: React.FC<Omit<AuthPageProps, 'adminOnly' | 'initialMode' | 'initialRole'>> = (props) => (
+  <AuthPage {...props} adminOnly />
+);

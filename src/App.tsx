@@ -30,7 +30,7 @@ import { apiService } from './services/apiService';
 import { authApi } from './services/api';
 
 import { Header, toBanglaDistrict, toBanglaNumber } from './components/Header';
-import { AuthPage } from './components/AuthPage';
+import { AuthPage, AdminLoginPage } from './components/AuthPage';
 import { AdminVerificationModal } from './components/AdminVerificationModal';
 import { FarmerDashboard } from './components/FarmerDashboard';
 import { WholesalerDashboard } from './components/WholesalerDashboard';
@@ -56,14 +56,22 @@ function extractTrackerOrderId(pathname: string): string | null {
   return match && match[1] ? decodeURIComponent(match[1]) : null;
 }
 
+function isAdminLoginPath(pathname: string): boolean {
+  return /\/amarhaatadmin\/?$/i.test(pathname);
+}
+
 export default function App() {
   const [trackerOrderId, setTrackerOrderId] = useState<string | null>(() =>
     typeof window !== 'undefined' ? extractTrackerOrderId(window.location.pathname) : null
+  );
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? isAdminLoginPath(window.location.pathname) : false
   );
 
   useEffect(() => {
     const onPopState = () => {
       setTrackerOrderId(extractTrackerOrderId(window.location.pathname));
+      setIsAdminRoute(isAdminLoginPath(window.location.pathname));
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -467,6 +475,47 @@ export default function App() {
         <div className="text-stone-300 text-xs font-semibold tracking-wide">
           {language === 'bn' ? 'নিরাপত্তা যাচাইকরণ হচ্ছে...' : 'Verifying secure session...'}
         </div>
+      </div>
+    );
+  }
+
+  // Dedicated hidden Admin Login route at /amarhaatadmin
+  if (isAdminRoute && (!currentUser || canonicalRole !== 'admin')) {
+    return (
+      <div className="min-h-screen bg-stone-100 dark:bg-stone-950 flex flex-col">
+        <AdminLoginPage
+          language={language}
+          onLanguageToggle={() => setLanguage((prev) => (prev === 'bn' ? 'en' : 'bn'))}
+          onBack={() => {
+            if (typeof window !== 'undefined') {
+              window.history.pushState({}, '', '/');
+            }
+            setIsAdminRoute(false);
+            setIsAuthOpen(false);
+          }}
+          onAuthSuccess={(user) => {
+            const safeUser: User = {
+              ...user,
+              password: '***',
+              sessionToken: user.sessionToken || `nb_sec_${Date.now()}`,
+              sessionExpiresAt: user.sessionExpiresAt || new Date(Date.now() + 43200000).toISOString(),
+            };
+            AuthStore.setCurrentUser(safeUser);
+            localStorage.setItem('nb_current_user', JSON.stringify(safeUser));
+            setCurrentUser(safeUser);
+            if (typeof window !== 'undefined') {
+              window.history.replaceState({}, '', '/');
+            }
+            setIsAdminRoute(false);
+            setIsAuthOpen(false);
+            setActiveView('dashboard');
+            showToast(
+              language === 'bn'
+                ? `স্বাগতম, ${safeUser.name || 'অ্যাডমিন'}! আপনি সফলভাবে প্রবেশ করেছেন।`
+                : `Welcome, ${safeUser.name || 'Admin'}! Signed in successfully.`
+            );
+          }}
+        />
       </div>
     );
   }
