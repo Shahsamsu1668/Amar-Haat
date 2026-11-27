@@ -596,33 +596,9 @@ app.get('/api/health/liveness', (_req, res) => {
   });
 });
 
-// Primary Health Check (Verifies active Neon Cloud PostgreSQL connectivity)
-app.get('/api/health', async (_req, res) => {
-  const start = Date.now();
-  try {
-    await pool.query('SELECT 1');
-    const latencyMs = Date.now() - start;
-    return res.json({
-      status: 'ok',
-      service: 'NativeBazar Backend (Neon Cloud PostgreSQL)',
-      database: 'Neon PostgreSQL (Connected)',
-      latencyMs,
-      aiEnabled: !!ai,
-      roles: ['Farmer', 'Wholesaler', 'Retailer', 'Consumer', 'Supplier', 'Admin'],
-      pilotDistrict: 'Bogura, Bangladesh',
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    return res.status(503).json({
-      status: 'unhealthy',
-      service: 'NativeBazar Backend',
-      database: 'Neon PostgreSQL (Disconnected)',
-      error: err.message || 'Database connection error',
-      latencyMs,
-      timestamp: new Date().toISOString(),
-    });
-  }
+// Lightweight Health Check for UptimeRobot (Zero DB I/O so Neon stays scaled to zero)
+app.get('/api/health', (_req, res) => {
+  return res.status(200).json({ status: 'Server is awake' });
 });
 
 // Readiness Probe (Verifies PostgreSQL connectivity AND core schema availability)
