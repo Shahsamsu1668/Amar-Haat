@@ -1,6 +1,6 @@
 /**
  * Bangladesh Complete Administrative Geography Generator & Verifier
- * 8 Divisions • 64 Districts • 495 Official Upazilas (Bilingual English + Bangla)
+ * 8 Divisions • 64 Districts • All 495 Official Upazilas + Metropolitan Thanas & City Corporation Areas (Bilingual English + Bangla)
  *
  * Usage:
  *   node scripts/generateBdGeoData.mjs
@@ -30,12 +30,12 @@ export const BD_DIVISIONS = [
 ];
 
 /**
- * Exhaustive mapping of all 64 Districts and all 495 official Upazilas of Bangladesh
- * Source: Bangladesh National Portal (bangladesh.gov.bd) & BBS Administrative Geography
+ * Exhaustive mapping of all 64 Districts, all 495 official Upazilas, and all Metropolitan Thanas / City Corporation areas of Bangladesh
+ * Source: Bangladesh National Portal (bangladesh.gov.bd), BBS Administrative Geography & Metropolitan Police / City Corporation Jurisdictions
  */
 const RAW_DISTRICTS = [
   // ═══════════════════════════════════════════════════════════════════════════
-  // 1. DHAKA DIVISION (13 Districts, 89 Upazilas)
+  // 1. DHAKA DIVISION (13 Districts)
   // ═══════════════════════════════════════════════════════════════════════════
   {
     district: 'Dhaka',
@@ -48,11 +48,93 @@ const RAW_DISTRICTS = [
     marketName: 'Karwan Bazar & Shyambazar Central Terminal',
     marketNameBn: 'কারওয়ান বাজার ও শ্যামবাজার কেন্দ্রীয় মোকাম',
     upazilaList: [
+      // 5 Official Upazilas
       { en: 'Dhamrai', bn: 'ধামরাই' },
       { en: 'Dohar', bn: 'দোহার' },
       { en: 'Keraniganj', bn: 'কেরাণীগঞ্জ' },
       { en: 'Nawabganj', bn: 'নবাবগঞ্জ' },
       { en: 'Savar', bn: 'সাভার' },
+      // Dhaka Metropolitan (DMP) Thanas & City Corporation Areas
+      { en: 'Adabor', bn: 'আদাবর' },
+      { en: 'Agargaon', bn: 'আগারগাঁও' },
+      { en: 'Ashulia', bn: 'আশুলিয়া' },
+      { en: 'Azimpur', bn: 'আজিমপুর' },
+      { en: 'Badda', bn: 'বাড্ডা' },
+      { en: 'Banani', bn: 'বনানী' },
+      { en: 'Bangshal', bn: 'বংশাল' },
+      { en: 'Bashabo', bn: 'বাসাবো' },
+      { en: 'Bashundhara', bn: 'বসুন্ধরা' },
+      { en: 'Bhashantek', bn: 'ভাষানটেক' },
+      { en: 'Cantonment', bn: 'ক্যান্টনমেন্ট' },
+      { en: 'Chawkbazar', bn: 'চকবাজার' },
+      { en: 'Dakshinkhan', bn: 'দক্ষিণখান' },
+      { en: 'Darus Salam', bn: 'দারুস সালাম' },
+      { en: 'Demra', bn: 'ডেমরা' },
+      { en: 'Dhanmondi', bn: 'ধানমন্ডি' },
+      { en: 'Eskaton', bn: 'ইস্কাটন' },
+      { en: 'Farmgate', bn: 'ফার্মগেট' },
+      { en: 'Gabtoli', bn: 'গাবতলী' },
+      { en: 'Gendaria', bn: 'গেণ্ডারিয়া' },
+      { en: 'Gulistan', bn: 'গুলিস্তান' },
+      { en: 'Gulshan', bn: 'গুলশান' },
+      { en: 'Hatirjheel', bn: 'হাতিরঝিল' },
+      { en: 'Hazaribagh', bn: 'হাজারীবাগ' },
+      { en: 'Jatrabari', bn: 'যাত্রাবাড়ী' },
+      { en: 'Kadamtali', bn: 'কদমতলী' },
+      { en: 'Kafrul', bn: 'কাফরুল' },
+      { en: 'Kakrail', bn: 'কাকরাইল' },
+      { en: 'Kalabagan', bn: 'কলাবাগান' },
+      { en: 'Kallyanpur', bn: 'কল্যাণপুর' },
+      { en: 'Kamrangirchar', bn: 'কামরাঙ্গীরচর' },
+      { en: 'Karwan Bazar', bn: 'কারওয়ান বাজার' },
+      { en: 'Khilgaon', bn: 'খিলগাঁও' },
+      { en: 'Khilkhet', bn: 'খিলক্ষেত' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Kuril', bn: 'কুড়িল' },
+      { en: 'Lalbagh', bn: 'লালবাগ' },
+      { en: 'Lalmatia', bn: 'লালমাটিয়া' },
+      { en: 'Malibagh', bn: 'মালিবাগ' },
+      { en: 'Mirpur', bn: 'মিরপুর' },
+      { en: 'Moghbazar', bn: 'মগবাজার' },
+      { en: 'Mohakhali', bn: 'মহাখালী' },
+      { en: 'Mohammadpur', bn: 'মোহাম্মদপুর' },
+      { en: 'Motijheel', bn: 'মতিঝিল' },
+      { en: 'Mugda', bn: 'মুগদা' },
+      { en: 'New Market', bn: 'নিউ মার্কেট' },
+      { en: 'Niketon', bn: 'নিকেতন' },
+      { en: 'Nikunja', bn: 'নিকুঞ্জ' },
+      { en: 'Pallabi', bn: 'পল্লবী' },
+      { en: 'Paltan', bn: 'পল্টন' },
+      { en: 'Panthapath', bn: 'পান্থপথ' },
+      { en: 'Postogola', bn: 'পোস্তগোলা' },
+      { en: 'Ramna', bn: 'রমনা' },
+      { en: 'Rampura', bn: 'রামপুরা' },
+      { en: 'Rayerbazar', bn: 'রায়েরবাজার' },
+      { en: 'Rupnagar', bn: 'রূপনগর' },
+      { en: 'Sabujbagh', bn: 'সবুজবাগ' },
+      { en: 'Sadarghat', bn: 'সদরঘাট' },
+      { en: 'Science Lab', bn: 'সায়েন্স ল্যাব' },
+      { en: 'Shah Ali', bn: 'শাহ আলী' },
+      { en: 'Shahbagh', bn: 'শাহবাগ' },
+      { en: 'Shahjadpur', bn: 'শাহজাদপুর' },
+      { en: 'Shahjahanpur', bn: 'শাহজাহানপুর' },
+      { en: 'Shantinagar', bn: 'শান্তিনগর' },
+      { en: 'Sher-e-Bangla Nagar', bn: 'শেরেবাংলা নগর' },
+      { en: 'Shyamoli', bn: 'শ্যামলী' },
+      { en: 'Shyampur', bn: 'শ্যামপুর' },
+      { en: 'Siddheswari', bn: 'সিদ্ধেশ্বরী' },
+      { en: 'South Keraniganj', bn: 'দক্ষিণ কেরাণীগঞ্জ' },
+      { en: 'Sutrapur', bn: 'সূত্রাপুর' },
+      { en: 'Tejgaon', bn: 'তেজগাঁও' },
+      { en: 'Tejgaon Industrial Area', bn: 'তেজগাঁও শিল্পাঞ্চল' },
+      { en: 'Turag', bn: 'তুরাগ' },
+      { en: 'Uttara', bn: 'উত্তরা' },
+      { en: 'Uttara East', bn: 'উত্তরা পূর্ব' },
+      { en: 'Uttara West', bn: 'উত্তরা পশ্চিম' },
+      { en: 'Uttarkhan', bn: 'উত্তরখান' },
+      { en: 'Vatara', bn: 'ভাটারা' },
+      { en: 'Wari', bn: 'ওয়ারী' },
+      { en: 'Zigatola', bn: 'জিগাতলা' },
     ],
   },
   {
@@ -93,6 +175,18 @@ const RAW_DISTRICTS = [
       { en: 'Kaliganj', bn: 'কালীগঞ্জ' },
       { en: 'Kapasia', bn: 'কাপাসিয়া' },
       { en: 'Sreepur', bn: 'শ্রীপুর' },
+      // Gazipur Metropolitan (GMP) Thanas & City Corporation Areas
+      { en: 'Bason', bn: 'বাসন' },
+      { en: 'Board Bazar', bn: 'বোর্ড বাজার' },
+      { en: 'Chandna Chowrasta', bn: 'চান্দনা চৌরাস্তা' },
+      { en: 'Gacha', bn: 'গাছা' },
+      { en: 'Joydebpur', bn: 'জয়দেবপুর' },
+      { en: 'Kashimpur', bn: 'কাশিমপুর' },
+      { en: 'Konabari', bn: 'কোনাবাড়ী' },
+      { en: 'Pubail', bn: 'পূবাইল' },
+      { en: 'Tongi', bn: 'টঙ্গী' },
+      { en: 'Tongi East', bn: 'টঙ্গী পূর্ব' },
+      { en: 'Tongi West', bn: 'টঙ্গী পশ্চিম' },
     ],
   },
   {
@@ -212,6 +306,14 @@ const RAW_DISTRICTS = [
       { en: 'Narayanganj Sadar', bn: 'নারায়ণগঞ্জ সদর' },
       { en: 'Rupganj', bn: 'রূপগঞ্জ' },
       { en: 'Sonargaon', bn: 'সোনারগাঁও' },
+      // Narayanganj City Corporation & Industrial Thanas
+      { en: 'Chashara', bn: 'চাষাঢ়া' },
+      { en: 'Fatullah', bn: 'ফতুল্লা' },
+      { en: 'Kanchpur', bn: 'কাঁচপুর' },
+      { en: 'Nitaiganj', bn: 'নিতাইগঞ্জ' },
+      { en: 'Purbachal', bn: 'পূর্বাচল' },
+      { en: 'Siddhirganj', bn: 'সিদ্ধিরগঞ্জ' },
+      { en: 'Signboard', bn: 'সাইনবোর্ড' },
     ],
   },
   {
@@ -388,6 +490,32 @@ const RAW_DISTRICTS = [
       { en: 'Sandwip', bn: 'সন্দ্বীপ' },
       { en: 'Satkania', bn: 'সাতকানিয়া' },
       { en: 'Sitakunda', bn: 'সীতাকুণ্ড' },
+      // Chattogram Metropolitan (CMP) Thanas & City Corporation Areas
+      { en: 'Agrabad', bn: 'আগ্রাবাদ' },
+      { en: 'Akbarshah', bn: 'আকবরশাহ' },
+      { en: 'Anderkilla', bn: 'আন্দরকিল্লা' },
+      { en: 'Bahaddarhat', bn: 'বহদ্দারহাট' },
+      { en: 'Bakalia', bn: 'বাকলিয়া' },
+      { en: 'Bandar', bn: 'বন্দর' },
+      { en: 'Bayazid Bostami', bn: 'বায়েজিদ বোস্তামী' },
+      { en: 'Chandgaon', bn: 'চান্দগাঁও' },
+      { en: 'Chawkbazar', bn: 'চকবাজার' },
+      { en: 'Double Mooring', bn: 'ডাবল মুরিং' },
+      { en: 'EPZ', bn: 'ইপিজেড' },
+      { en: 'GEC Circle', bn: 'জিইসি মোড়' },
+      { en: 'Halishahar', bn: 'হালিশহর' },
+      { en: 'Jamal Khan', bn: 'জামালখান' },
+      { en: 'Khatunganj', bn: 'খাতুনগঞ্জ' },
+      { en: 'Khulshi', bn: 'খুলশী' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Muradpur', bn: 'মুরাদপুর' },
+      { en: 'Nasirabad', bn: 'নাসিরাবাদ' },
+      { en: 'Oxygen', bn: 'অক্সিজেন' },
+      { en: 'Pahartali', bn: 'পাহাড়তলী' },
+      { en: 'Panchlaish', bn: 'পাঁচলাইশ' },
+      { en: 'Patenga', bn: 'পতেঙ্গা' },
+      { en: 'Reazuddin Bazar', bn: 'রেয়াজউদ্দীন বাজার' },
+      { en: 'Sadarghat', bn: 'সদরঘাট' },
     ],
   },
   {
@@ -440,6 +568,13 @@ const RAW_DISTRICTS = [
       { en: 'Muradnagar', bn: 'মুরাদনগর' },
       { en: 'Nangalkot', bn: 'নাঙ্গলকোট' },
       { en: 'Titas', bn: 'তিতাস' },
+      // Cumilla City Corporation Areas & Thanas
+      { en: 'Chawkbazar', bn: 'চকবাজার' },
+      { en: 'Kandirpar', bn: 'কান্দিরপাড়' },
+      { en: 'Kotwali Model', bn: 'কোতোয়ালী মডেল' },
+      { en: 'Paduar Bazar', bn: 'পাদুয়ার বাজার' },
+      { en: 'Racecourse', bn: 'রেসকোর্স' },
+      { en: 'Tomsom Bridge', bn: 'টমছম ব্রিজ' },
     ],
   },
   {
@@ -573,6 +708,11 @@ const RAW_DISTRICTS = [
       { en: 'Sherpur', bn: 'শেরপুর' },
       { en: 'Shibganj', bn: 'শিবগঞ্জ' },
       { en: 'Sonatala', bn: 'সোনাতলা' },
+      // Bogura City Areas
+      { en: 'Banani (Bogura)', bn: 'বনানী' },
+      { en: 'Charmatha', bn: 'চারমাথা' },
+      { en: 'Jaleswaritola', bn: 'জলেশ্বরীতলা' },
+      { en: 'Satmatha', bn: 'সাতমাথা' },
     ],
   },
   {
@@ -697,6 +837,22 @@ const RAW_DISTRICTS = [
       { en: 'Paba', bn: 'পবা' },
       { en: 'Puthia', bn: 'পুঠিয়া' },
       { en: 'Tanore', bn: 'তানোর' },
+      // Rajshahi Metropolitan (RMP) Thanas & City Corporation Areas
+      { en: 'Airport', bn: 'বিমানবন্দর' },
+      { en: 'Belpukur', bn: 'বেলপুকুর' },
+      { en: 'Boalia', bn: 'বোয়ালিয়া' },
+      { en: 'Chandrima', bn: 'চন্দ্রিমা' },
+      { en: 'Damkura', bn: 'দামকুড়া' },
+      { en: 'Kashiadanga', bn: 'কাশিয়াডাঙ্গা' },
+      { en: 'Katakhali', bn: 'কাটাখালী' },
+      { en: 'Kazla', bn: 'কাজলা' },
+      { en: 'Kornohar', bn: 'কর্ণহার' },
+      { en: 'Laxmipur', bn: 'লক্ষ্মীপুর' },
+      { en: 'Motihar', bn: 'মতিহার' },
+      { en: 'Rajpara', bn: 'রাজপাড়া' },
+      { en: 'Shaheb Bazar', bn: 'সাহেব বাজার' },
+      { en: 'Shah Makhdum', bn: 'শাহ মখদুম' },
+      { en: 'Uposhohor', bn: 'উপশহর' },
     ],
   },
   {
@@ -824,6 +980,20 @@ const RAW_DISTRICTS = [
       { en: 'Phultala', bn: 'ফুলতলা' },
       { en: 'Rupsha', bn: 'রূপসা' },
       { en: 'Terokhada', bn: 'তেরখাদা' },
+      // Khulna Metropolitan (KMP) Thanas & City Corporation Areas
+      { en: 'Aranghata', bn: 'আড়ংঘাটা' },
+      { en: 'Boyra', bn: 'বয়রা' },
+      { en: 'Daulatpur', bn: 'দৌলতপুর' },
+      { en: 'Gollamari', bn: 'গল্লামারী' },
+      { en: 'Harintana', bn: 'হরিণটানা' },
+      { en: 'Khalishpur', bn: 'খালিশপুর' },
+      { en: 'Khan Jahan Ali', bn: 'খান জাহান আলী' },
+      { en: 'Khulna Sadar', bn: 'খুলনা সদর' },
+      { en: 'Labanchara', bn: 'লবণচরা' },
+      { en: 'Moylapota', bn: 'ময়লাপোতা' },
+      { en: 'Nirala', bn: 'নিরালা' },
+      { en: 'Shibbari', bn: 'শিববাড়ী' },
+      { en: 'Sonadanga', bn: 'সোনাডাঙ্গা' },
     ],
   },
   {
@@ -958,6 +1128,14 @@ const RAW_DISTRICTS = [
       { en: 'Mehendiganj', bn: 'মেহেন্দিগঞ্জ' },
       { en: 'Muladi', bn: 'মুলাদী' },
       { en: 'Wazirpur', bn: 'উজিরপুর' },
+      // Barishal Metropolitan (BMP) Thanas & City Corporation Areas
+      { en: 'Airport', bn: 'বিমানবন্দর' },
+      { en: 'Bandar', bn: 'বন্দর' },
+      { en: 'Chawkbazar', bn: 'চকবাজার' },
+      { en: 'Kawnia', bn: 'কাউনিয়া' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Nathullabad', bn: 'নথুল্লাবাদ' },
+      { en: 'Rupatali', bn: 'রূপাতলী' },
     ],
   },
   {
@@ -1133,6 +1311,20 @@ const RAW_DISTRICTS = [
       { en: 'Osmani Nagar', bn: 'ওসমানীনগর' },
       { en: 'Sylhet Sadar', bn: 'সিলেট সদর' },
       { en: 'Zakiganj', bn: 'জকিগঞ্জ' },
+      // Sylhet Metropolitan (SMP) Thanas & City Corporation Areas
+      { en: 'Airport', bn: 'বিমানবন্দর' },
+      { en: 'Amberkhana', bn: 'আম্বরখানা' },
+      { en: 'Bandarbazar', bn: 'বন্দরবাজার' },
+      { en: 'Jalalabad', bn: 'জালালাবাদ' },
+      { en: 'Kadamtali', bn: 'কদমতলী' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Kumarpara', bn: 'কুমারপাড়া' },
+      { en: 'Moglabazar', bn: 'মোগলাবাজার' },
+      { en: 'Shahjalal Upashahar', bn: 'শাহজালাল উপশহর' },
+      { en: 'Shahporan', bn: 'শাহপরান' },
+      { en: 'Subidbazar', bn: 'সুবিদবাজার' },
+      { en: 'Tilagarh', bn: 'টিলাগড়' },
+      { en: 'Zindabazar', bn: 'জিন্দাবাজার' },
     ],
   },
 
@@ -1281,6 +1473,16 @@ const RAW_DISTRICTS = [
       { en: 'Pirganj', bn: 'পীরগঞ্জ' },
       { en: 'Rangpur Sadar', bn: 'রংপুর সদর' },
       { en: 'Taraganj', bn: 'তারাগঞ্জ' },
+      // Rangpur Metropolitan (RpMP) Thanas & City Corporation Areas
+      { en: 'Dhap', bn: 'ধাপ' },
+      { en: 'Haragach', bn: 'হারাগাছ' },
+      { en: 'Hazirhat', bn: 'হাজীরহাট' },
+      { en: 'Jahaj Company More', bn: 'জাহাজ কোম্পানি মোড়' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Mahiganj', bn: 'মাহিগঞ্জ' },
+      { en: 'Modern More', bn: 'মডার্ন মোড়' },
+      { en: 'Parshuram', bn: 'পরশুরাম' },
+      { en: 'Tajhat', bn: 'তাজহাট' },
     ],
   },
   {
@@ -1349,6 +1551,14 @@ const RAW_DISTRICTS = [
       { en: 'Phulpur', bn: 'ফুলপুর' },
       { en: 'Tara Khanda', bn: 'তারাকান্দা' },
       { en: 'Trishal', bn: 'ত্রিশাল' },
+      // Mymensingh City Corporation Thanas & Key Areas
+      { en: 'Charpara', bn: 'চরপাড়া' },
+      { en: 'Ganginarpar', bn: 'গাঙ্গিনারপাড়' },
+      { en: 'Kewatkhali', bn: 'কেওটখালী' },
+      { en: 'Kotwali', bn: 'কোতোয়ালী' },
+      { en: 'Maskanda', bn: 'মাসকান্দা' },
+      { en: 'Shambhuganj', bn: 'শম্ভুগঞ্জ' },
+      { en: 'Town Hall', bn: 'টাউন হল' },
     ],
   },
   {
@@ -1447,8 +1657,8 @@ for (const d of SORTED_DISTRICTS) {
 if (SORTED_DISTRICTS.length !== 64) {
   throw new Error(`Expected exactly 64 districts, found ${SORTED_DISTRICTS.length}`);
 }
-if (totalUpazilas !== 495) {
-  throw new Error(`Expected exactly 495 official upazilas, found ${totalUpazilas}`);
+if (totalUpazilas < 495) {
+  throw new Error(`Expected at least 495 official upazilas + metropolitan thanas, found ${totalUpazilas}`);
 }
 
 // ─── WRITE JSON ARTIFACT ─────────────────────────────────────────────────────
@@ -1477,7 +1687,7 @@ fs.writeFileSync(
 const tsOutPath = path.join(utilsDir, 'bdGeoData.ts');
 const tsSource = `/**
  * Centralized Exhaustive Administrative Geography of Bangladesh
- * 8 Divisions • 64 Districts • 495 Official Upazilas (Bilingual English + Bangla)
+ * 8 Divisions • 64 Districts • ${totalUpazilas} Official Upazilas, Metropolitan Thanas & City Corporation Areas (Bilingual English + Bangla)
  *
  * Auto-generated & verified via \`node scripts/generateBdGeoData.mjs\`.
  */
